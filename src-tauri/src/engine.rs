@@ -3,6 +3,7 @@
 //! - Antigravity CLI (`agy`)  — 구글 계정 구독
 //! - Claude Code (`claude`)   — Claude Pro/Max 구독
 //! - Codex CLI (`codex`)      — ChatGPT Plus/Pro 구독
+//! - OpenCode (`opencode`)    — DeepSeek 무료 모델 · OpenCode Console/Go
 //! - Kiro CLI (`kiro-cli`)    — Kiro 구독 (안전 모드 실행 명령만 제공)
 //!
 //! 자식 프로세스 환경에서 API 키·클라우드 과금 관련 변수를 지워 구독 로그인 경로로만 동작하게 하고,
@@ -11,10 +12,13 @@
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+pub const OPENCODE_DEFAULT_MODEL: &str = "opencode/deepseek-v4.1-flash-free";
 
 const STRIPPED_ENV: &[&str] = &[
     "GEMINI_API_KEY",
@@ -38,20 +42,77 @@ const STRIPPED_ENV: &[&str] = &[
     "OPENAI_BASE_URL",
     "CODEX_API_KEY",
     "AZURE_OPENAI_API_KEY",
+    "OPENCODE_API_KEY",
+    "OPENCODE_AUTH_CONTENT",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_CONFIG",
+    "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "NVIDIA_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "ZHIPU_API_KEY",
+    "MOONSHOT_API_KEY",
+    "KIMI_API_KEY",
+    "MINIMAX_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "CEREBRAS_API_KEY",
+    "HF_TOKEN",
+    "AI_GATEWAY_API_KEY",
+    "REQUESTY_API_KEY",
+    "DEEPINFRA_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "COHERE_API_KEY",
+    "OLLAMA_API_KEY",
+    "LMSTUDIO_API_KEY",
+    "AZURE_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_API_KEY",
+    "DIGITALOCEAN_ACCESS_TOKEN",
+    "DATABRICKS_TOKEN",
 ];
 
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// OpenCode 자식 프로세스에서 제거할 공급자 API 키 환경 변수 패턴 검사.
+/// `^[A-Z0-9_]+_(API_KEY|API_TOKEN|APIKEY|ACCESS_KEY|SECRET_ACCESS_KEY|SERVICE_KEY|PAT)$` 및 GITHUB_TOKEN, GITLAB_TOKEN.
+pub fn is_opencode_secret_env(name: &str) -> bool {
+    if name == "GITHUB_TOKEN" || name == "GITLAB_TOKEN" {
+        return true;
+    }
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+        return false;
+    }
+    const SUFFIXES: &[&str] = &[
+        "_SECRET_ACCESS_KEY",
+        "_SERVICE_KEY",
+        "_ACCESS_KEY",
+        "_API_TOKEN",
+        "_API_KEY",
+        "_APIKEY",
+        "_PAT",
+    ];
+    SUFFIXES.iter().any(|s| name.len() > s.len() && name.ends_with(s))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Agy,
     Claude,
     Codex,
+    Opencode,
     Kiro,
 }
 
-pub const ALL: [Kind; 4] = [Kind::Agy, Kind::Claude, Kind::Codex, Kind::Kiro];
+pub const ALL: [Kind; 5] = [Kind::Agy, Kind::Claude, Kind::Codex, Kind::Opencode, Kind::Kiro];
 
 impl Kind {
     pub fn id(self) -> &'static str {
@@ -59,6 +120,7 @@ impl Kind {
             Kind::Agy => "agy",
             Kind::Claude => "claude",
             Kind::Codex => "codex",
+            Kind::Opencode => "opencode",
             Kind::Kiro => "kiro",
         }
     }
@@ -66,6 +128,7 @@ impl Kind {
         match s {
             "claude" => Kind::Claude,
             "codex" => Kind::Codex,
+            "opencode" => Kind::Opencode,
             "kiro" => Kind::Kiro,
             _ => Kind::Agy,
         }
@@ -75,6 +138,7 @@ impl Kind {
             Kind::Agy => "Antigravity",
             Kind::Claude => "Claude Code",
             Kind::Codex => "Codex",
+            Kind::Opencode => "OpenCode",
             Kind::Kiro => "Kiro",
         }
     }
@@ -83,6 +147,7 @@ impl Kind {
             Kind::Agy => "Google AI 구독",
             Kind::Claude => "Claude Pro/Max 구독",
             Kind::Codex => "ChatGPT Plus/Pro 구독",
+            Kind::Opencode => "OpenCode (DeepSeek 무료 · Console/Go)",
             Kind::Kiro => "Kiro 구독",
         }
     }
@@ -96,6 +161,7 @@ impl Kind {
                 Kind::Agy => &["agy.exe"],
                 Kind::Claude => &["claude.exe", "claude.cmd"],
                 Kind::Codex => &["codex.exe", "codex.cmd"],
+                Kind::Opencode => &["opencode.exe", "opencode.cmd"],
                 Kind::Kiro => &["kiro-cli.exe"],
             }
         } else {
@@ -103,6 +169,7 @@ impl Kind {
                 Kind::Agy => &["agy"],
                 Kind::Claude => &["claude"],
                 Kind::Codex => &["codex"],
+                Kind::Opencode => &["opencode"],
                 Kind::Kiro => &["kiro-cli"],
             }
         }
@@ -115,14 +182,29 @@ impl Kind {
             Kind::Agy => vec![local.join("agy").join("bin"), home.join(".local").join("bin")],
             Kind::Claude => vec![roaming.join("npm"), home.join(".local").join("bin"), home.join(".claude").join("local")],
             Kind::Codex => vec![roaming.join("npm"), home.join(".local").join("bin")],
+            Kind::Opencode => vec![
+                roaming.join("npm").join("node_modules").join("opencode-ai").join("bin"),
+                roaming.join("npm"),
+                home.join(".opencode").join("bin"),
+                home.join("scoop").join("shims"),
+                home.join(".local").join("bin"),
+            ],
             Kind::Kiro => vec![local.join("Kiro-Cli"), home.join(".local").join("bin")],
         }
     }
 }
 
-/// 실행 파일 위치: PATH → 기본 설치 위치 순서로 찾는다.
+/// 실행 파일 위치: OpenCode는 네이티브 바이너리(`node_modules/opencode-ai/bin/opencode.exe`)를 .cmd 래퍼보다 먼저 찾는다.
 pub fn locate(kind: Kind) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if kind == Kind::Opencode {
+        if let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            dirs.push(roaming.join("npm").join("node_modules").join("opencode-ai").join("bin"));
+        }
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
     dirs.extend(kind.fallback_dirs());
     for dir in dirs {
         for name in kind.exe_names() {
@@ -135,10 +217,40 @@ pub fn locate(kind: Kind) -> Option<PathBuf> {
     None
 }
 
-fn command(exe: &Path) -> tokio::process::Command {
+fn ensure_opencode_isolated_config() -> Option<(PathBuf, PathBuf)> {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("kr.ilson.desktop")
+        .join("opencode-config");
+    let oc_dir = base.join("opencode");
+    std::fs::create_dir_all(&oc_dir).ok()?;
+    let cfg_file = oc_dir.join("opencode.json");
+    if !cfg_file.is_file() {
+        let minimal = r#"{"$schema":"https://opencode.ai/config.json","autoupdate":false,"model":"opencode/deepseek-v4.1-flash-free"}"#;
+        let _ = std::fs::write(&cfg_file, minimal);
+    }
+    Some((base, oc_dir))
+}
+
+pub(crate) fn command_for(kind: Kind, exe: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(exe);
     for key in STRIPPED_ENV {
         cmd.env_remove(key);
+    }
+    if kind == Kind::Opencode {
+        for (k, _) in std::env::vars() {
+            if is_opencode_secret_env(&k) {
+                cmd.env_remove(&k);
+            }
+        }
+        cmd.env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+        if let Some((xdg_root, oc_dir)) = ensure_opencode_isolated_config() {
+            cmd.env("XDG_CONFIG_HOME", xdg_root);
+            cmd.env("OPENCODE_CONFIG_DIR", oc_dir);
+        }
+        cmd.arg("--pure");
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
@@ -168,8 +280,8 @@ pub struct ModelInfo {
     pub label: String,
 }
 
-async fn capture(exe: &Path, args: &[&str], secs: u64) -> Result<(bool, String, String)> {
-    let child = command(exe).stdin(Stdio::null()).args(args).spawn()?;
+async fn capture_for(kind: Kind, exe: &Path, args: &[&str], secs: u64) -> Result<(bool, String, String)> {
+    let child = command_for(kind, exe).stdin(Stdio::null()).args(args).spawn()?;
     let out = tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output())
         .await
         .map_err(|_| anyhow!("응답이 없어 중단했습니다"))??;
@@ -182,6 +294,56 @@ async fn capture(exe: &Path, args: &[&str], secs: u64) -> Result<(bool, String, 
 
 fn model(id: &str, label: &str) -> ModelInfo {
     ModelInfo { id: id.into(), label: label.into() }
+}
+
+pub fn opencode_static_models() -> Vec<ModelInfo> {
+    vec![
+        model("opencode/deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash (무료)"),
+        model("opencode/glm-5.3-flash-free", "GLM 5.3 Flash (무료)"),
+        model("opencode/nemotron-3.5-super-vl-free", "Nemotron 3.5 Super VL (무료)"),
+        model("opencode/big-pickle", "Big Pickle (무료)"),
+        model("opencode/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (Console)"),
+        model("opencode-go/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (Go)"),
+    ]
+}
+
+fn format_opencode_model_label(id: &str) -> String {
+    match id {
+        "opencode/deepseek-v4.1-flash-free" => "DeepSeek V4.1 Flash (무료)".into(),
+        "opencode/deepseek-v4.1-flash" => "DeepSeek V4.1 Flash (Console)".into(),
+        "opencode-go/deepseek-v4.1-flash" => "DeepSeek V4.1 Flash (Go)".into(),
+        "opencode/glm-5.3-flash-free" => "GLM 5.3 Flash (무료)".into(),
+        "opencode/nemotron-3.5-super-vl-free" => "Nemotron 3.5 Super VL (무료)".into(),
+        "opencode/nemotron-3.5-lightning-free" => "Nemotron 3.5 Lightning (무료)".into(),
+        "opencode/nemotron-3-ultra-free" => "Nemotron 3 Ultra (무료)".into(),
+        "opencode/big-pickle" => "Big Pickle (무료)".into(),
+        _ => {
+            let is_go = id.starts_with("opencode-go/");
+            let slug = id.split_once('/').map(|(_, s)| s).unwrap_or(id);
+            let (base, free) = match slug.strip_suffix("-free") {
+                Some(b) => (b, true),
+                None => (slug, false),
+            };
+            let words: Vec<String> = base
+                .split('-')
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect();
+            let title = words.join(" ");
+            if free {
+                format!("{title} (무료)")
+            } else if is_go {
+                format!("{title} (Go)")
+            } else {
+                title
+            }
+        }
+    }
 }
 
 /// 설치·로그인 상태를 확인한다. 어떤 엔진도 이 확인에 사용량을 쓰지 않는다.
@@ -198,6 +360,7 @@ pub async fn status(kind: Kind) -> EngineStatus {
             Kind::Agy => "Antigravity CLI(agy)를 찾지 못했습니다. Antigravity를 설치한 뒤 터미널에서 `agy install`을 실행해 주세요.".into(),
             Kind::Claude => "Claude Code를 찾지 못했습니다. `npm i -g @anthropic-ai/claude-code`로 설치할 수 있습니다.".into(),
             Kind::Codex => "Codex CLI를 찾지 못했습니다. `npm i -g @openai/codex`로 설치할 수 있습니다.".into(),
+            Kind::Opencode => "OpenCode를 찾지 못했습니다. `npm i -g opencode-ai@latest`로 설치할 수 있습니다.".into(),
             Kind::Kiro => "Kiro CLI를 찾지 못했습니다.".into(),
         });
         return st;
@@ -206,10 +369,10 @@ pub async fn status(kind: Kind) -> EngineStatus {
     st.path = Some(exe.to_string_lossy().into());
     match kind {
         Kind::Agy => {
-            if let Ok((_, out, _)) = capture(&exe, &["changelog"], 20).await {
+            if let Ok((_, out, _)) = capture_for(kind, &exe, &["changelog"], 20).await {
                 st.version = out.lines().next().map(|l| l.trim_end_matches(':').trim().to_string());
             }
-            match capture(&exe, &["models"], 40).await {
+            match capture_for(kind, &exe, &["models"], 40).await {
                 Ok((true, out, _)) => {
                     st.models = out
                         .lines()
@@ -224,10 +387,10 @@ pub async fn status(kind: Kind) -> EngineStatus {
             }
         }
         Kind::Claude => {
-            if let Ok((_, out, _)) = capture(&exe, &["--version"], 20).await {
+            if let Ok((_, out, _)) = capture_for(kind, &exe, &["--version"], 20).await {
                 st.version = out.split_whitespace().next().map(String::from);
             }
-            match capture(&exe, &["auth", "status"], 20).await {
+            match capture_for(kind, &exe, &["auth", "status"], 20).await {
                 Ok((_, out, _)) => {
                     let j: Value = serde_json::from_str(out.trim()).unwrap_or(Value::Null);
                     let method = j["authMethod"].as_str().unwrap_or("none").to_string();
@@ -245,10 +408,10 @@ pub async fn status(kind: Kind) -> EngineStatus {
             st.models = vec![model("", "Claude Code 기본값"), model("opus", "Opus"), model("sonnet", "Sonnet"), model("haiku", "Haiku")];
         }
         Kind::Codex => {
-            if let Ok((_, out, _)) = capture(&exe, &["--version"], 20).await {
+            if let Ok((_, out, _)) = capture_for(kind, &exe, &["--version"], 20).await {
                 st.version = out.split_whitespace().last().map(String::from);
             }
-            match capture(&exe, &["login", "status"], 20).await {
+            match capture_for(kind, &exe, &["login", "status"], 20).await {
                 Ok((_, out, err)) => {
                     let text = format!("{out}{err}");
                     let chatgpt = text.contains("ChatGPT");
@@ -264,11 +427,80 @@ pub async fn status(kind: Kind) -> EngineStatus {
             }
             st.models = vec![model("", "Codex 기본값")];
         }
+        Kind::Opencode => {
+            let mut msgs: Vec<String> = Vec::new();
+            if let Ok((_, out, _)) = capture_for(kind, &exe, &["--version"], 20).await {
+                let ver = out.split_whitespace().last().map(String::from);
+                if let Some(ref v) = ver {
+                    let major = v.trim_start_matches('v').split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(1);
+                    if major >= 2 {
+                        st.can_auto = false;
+                        msgs.push("OpenCode 2.x는 권한 제어 방식이 달라 안전 모드로만 연결합니다. 1.x(`npm i -g opencode-ai@latest`)를 권장합니다.".into());
+                    }
+                }
+                st.version = ver;
+            }
+            st.signed_in = true;
+            st.login = Some("자격 없음 · 무료 모델".into());
+            if let Ok((_, out, err)) = capture_for(kind, &exe, &["auth", "list"], 20).await {
+                let text = format!("{out}\n{err}");
+                let creds_section = text.split("Environment").next().unwrap_or(&text);
+                let mut has_opencode = false;
+                let mut has_other = false;
+                for line in creds_section.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('•') || trimmed.starts_with('*') || trimmed.starts_with('-') {
+                        let lower = trimmed.to_lowercase();
+                        if lower.contains("opencode") {
+                            has_opencode = true;
+                        } else {
+                            has_other = true;
+                        }
+                    }
+                }
+                if has_opencode {
+                    st.login = Some("OpenCode Console/Go 키 (CLI 보관)".into());
+                }
+                if has_other {
+                    msgs.push("다른 공급자 키는 쓰지 않습니다(모델을 opencode/로 고정)".into());
+                }
+            }
+            match capture_for(kind, &exe, &["models", "opencode"], 40).await {
+                Ok((true, out, _)) => {
+                    let mut parsed: Vec<ModelInfo> = out
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| l.starts_with("opencode/") || l.starts_with("opencode-go/"))
+                        .map(|id| model(id, &format_opencode_model_label(id)))
+                        .collect();
+                    if parsed.is_empty() {
+                        st.models = opencode_static_models();
+                        msgs.push("모델 목록을 가져오지 못해 기본 목록을 씁니다".into());
+                    } else {
+                        // 기본 모델이 맨 앞에 오도록 정렬하고 Go/Console 모델 선택지도 보존한다.
+                        parsed.sort_by_key(|m| if m.id == OPENCODE_DEFAULT_MODEL { 0 } else { 1 });
+                        for extra in ["opencode/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash"] {
+                            if !parsed.iter().any(|m| m.id == extra) {
+                                parsed.push(model(extra, &format_opencode_model_label(extra)));
+                            }
+                        }
+                        st.models = parsed;
+                    }
+                }
+                _ => {
+                    st.models = opencode_static_models();
+                    msgs.push("모델 목록을 가져오지 못해 기본 목록을 씁니다".into());
+                }
+            }
+            if !msgs.is_empty() {
+                st.message = Some(msgs.join(" · "));
+            }
+        }
         Kind::Kiro => {
-            if let Ok((_, out, _)) = capture(&exe, &["--version"], 20).await {
+            if let Ok((_, out, _)) = capture_for(kind, &exe, &["--version"], 20).await {
                 st.version = out.split_whitespace().last().map(String::from);
             }
-            if let Ok((ok, out, _)) = capture(&exe, &["whoami"], 20).await {
+            if let Ok((ok, out, _)) = capture_for(kind, &exe, &["whoami"], 20).await {
                 // 이메일 등 개인 정보는 저장하지 않고 로그인 방식만 남긴다.
                 st.signed_in = ok && out.contains("Logged in");
                 st.login = out.lines().find(|l| l.starts_with("Logged in")).map(|l| l.trim().to_string());
@@ -280,11 +512,28 @@ pub async fn status(kind: Kind) -> EngineStatus {
 }
 
 /// 사람이 알아볼 수 있는 실패 이유로 바꾼다.
-fn friendly(text: &str) -> Option<String> {
+pub fn friendly(text: &str) -> Option<String> {
     let t = text.to_lowercase();
-    let msg = if t.contains("authentication expired") || t.contains("log back in") || t.contains("not logged in") || t.contains("please log in") || t.contains("401") || t.contains("unauthorized") || t.contains("invalid api key") {
+    let msg = if t.contains("free usage exceeded") || t.contains("add credits") {
+        "OpenCode 무료 한도에 닿았습니다. 잠시 뒤 이어하기를 누르거나 연결 및 설정에서 Go 모델을 선택해 주세요."
+    } else if t.contains("missingsessionid") {
+        "OpenCode 세션 오류가 발생했습니다. 잠시 뒤 다시 시도하거나 버전을 확인해 주세요."
+    } else if t.contains("authentication expired")
+        || t.contains("log back in")
+        || t.contains("not logged in")
+        || t.contains("please log in")
+        || t.contains("401")
+        || t.contains("unauthorized")
+        || t.contains("invalid api key")
+    {
         "구독 로그인이 필요하거나 만료되었습니다. 연결 및 설정에서 ‘로그인 창 열기’로 다시 로그인해 주세요."
-    } else if t.contains("ai credits balance") || t.contains("quota") || t.contains("resource_exhausted") || t.contains("rate limit") || t.contains("usage limit") || t.contains("limit reached") {
+    } else if t.contains("ai credits balance")
+        || t.contains("quota")
+        || t.contains("resource_exhausted")
+        || t.contains("rate limit")
+        || t.contains("usage limit")
+        || t.contains("limit reached")
+    {
         "구독 사용 한도에 닿았습니다. 한도가 다시 채워진 뒤 ‘이어하기’를 눌러 주세요."
     } else if t.contains("suspended") || t.contains("verify your account") || t.contains("terms of service") {
         "계정이 정지되었거나 확인이 필요하다는 응답을 받았습니다. 해당 서비스에 직접 로그인해 안내를 확인해 주세요."
@@ -333,9 +582,37 @@ pub fn level_args(kind: Kind, level: Level) -> Vec<&'static str> {
         (Kind::Codex, Level::ReadOnly) => vec!["-s", "read-only"],
         (Kind::Codex, Level::Edit) | (Kind::Codex, Level::Sandbox) => vec!["-s", "workspace-write"],
         (Kind::Codex, Level::Yolo) => vec!["--dangerously-bypass-approvals-and-sandbox"],
+        (Kind::Opencode, Level::Yolo) => vec!["--auto"],
+        (Kind::Opencode, _) => vec![],
         (Kind::Kiro, Level::ReadOnly) => vec!["--trust-tools=fs_read"],
         (Kind::Kiro, Level::Edit) => vec!["--trust-tools=fs_read,fs_write"],
         (Kind::Kiro, _) => vec!["--trust-all-tools"],
+    }
+}
+
+/// OpenCode 권한 단계별 환경 변수(`OPENCODE_PERMISSION` 인라인 JSON).
+pub fn level_env(kind: Kind, level: Level) -> Vec<(&'static str, String)> {
+    if kind != Kind::Opencode {
+        return vec![];
+    }
+    let json = match level {
+        Level::ReadOnly => r#"{"edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny","doom_loop":"deny"}"#,
+        Level::Edit => r#"{"edit":"allow","bash":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny","doom_loop":"deny"}"#,
+        Level::Sandbox => r#"{"edit":"allow","bash":"allow","webfetch":"allow","websearch":"allow","external_directory":"deny","doom_loop":"deny"}"#,
+        Level::Yolo => r#"{"*":"allow"}"#,
+    };
+    vec![("OPENCODE_PERMISSION", json.into())]
+}
+
+/// 화면의 권한 단계 표에 보여 줄 문자열.
+pub fn level_display(kind: Kind, level: Level) -> String {
+    let args = level_args(kind, level).join(" ");
+    let envs: Vec<String> = level_env(kind, level).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    match (args.is_empty(), envs.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => args,
+        (true, false) => envs.join(" "),
+        (false, false) => format!("{args} ({})", envs.join(" ")),
     }
 }
 
@@ -345,6 +622,7 @@ pub struct RunOptions<'a> {
     pub prompt: String,
     pub model: Option<String>,
     pub level: Level,
+    pub title: Option<String>,
 }
 
 /// 진행 중 화면에 보여 줄 활동.
@@ -364,12 +642,18 @@ impl Activity {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct RunResult {
     pub response: String,
     pub conversation_id: Option<String>,
+    /// 신규 입력 토큰 (캐시 제외)
     pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub reported_cost_usd: Option<f64>,
+    pub duration_ms: u64,
     pub model: Option<String>,
     pub denied: Vec<String>,
     pub tools_used: u32,
@@ -418,10 +702,16 @@ fn tool_activity(name: &str, params: &Value, done: bool) -> Activity {
 }
 
 /// 엔진별 출력 한 줄을 읽어 진행 상황과 결과를 모은다.
+#[derive(Default)]
 struct Collector {
     out: RunResult,
     status: Option<Result<(), String>>,
     speaking: bool,
+    step_buf: String,
+    all_text: String,
+    seen_step_ids: HashSet<String>,
+    cost_accum: f64,
+    has_cost: bool,
 }
 
 impl Collector {
@@ -430,7 +720,46 @@ impl Collector {
             Kind::Agy => self.agy(ev, on),
             Kind::Claude => self.claude(ev, on),
             Kind::Codex => self.codex(ev, on),
+            Kind::Opencode => self.opencode(ev, on),
             Kind::Kiro => {}
+        }
+    }
+
+    fn raw_line(&mut self, kind: Kind, line: &str) {
+        if kind != Kind::Opencode {
+            return;
+        }
+        let lower = line.to_lowercase();
+        if lower.contains("auto-rejecting") || lower.contains("permission denied") {
+            let tool = if let Some(idx) = lower.find("permission requested:") {
+                let after = line[idx + "permission requested:".len()..].trim();
+                after
+                    .split(|c: char| c.is_whitespace() || c == '(' || c == ';' || c == ':' || c == ',')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("권한 거부")
+                    .to_string()
+            } else {
+                "권한 거부".to_string()
+            };
+            if !self.out.denied.contains(&tool) {
+                self.out.denied.push(tool);
+            }
+        }
+    }
+
+    fn finish(&mut self, kind: Kind, exit_ok: bool) {
+        if kind == Kind::Opencode {
+            self.out.response = if !self.step_buf.trim().is_empty() {
+                self.step_buf.clone()
+            } else {
+                self.all_text.clone()
+            };
+            if self.has_cost {
+                self.out.reported_cost_usd = Some(self.cost_accum);
+            }
+            if self.status.is_none() && exit_ok && !self.out.response.trim().is_empty() {
+                self.status = Some(Ok(()));
+            }
         }
     }
 
@@ -463,8 +792,12 @@ impl Collector {
             Some("result") => {
                 let r = &ev["result"];
                 self.out.response = r["response"].as_str().unwrap_or("").to_string();
-                self.out.input_tokens = r["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                self.out.output_tokens = r["usage"]["output_tokens"].as_u64().unwrap_or(0) + r["usage"]["thinking_tokens"].as_u64().unwrap_or(0);
+                let raw_in = r["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                let cache_read = r["usage"]["cache_read_tokens"].as_u64().unwrap_or(0);
+                self.out.input_tokens = raw_in.saturating_sub(cache_read);
+                self.out.cache_read_tokens = cache_read;
+                self.out.output_tokens = r["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                self.out.reasoning_tokens = r["usage"]["thinking_tokens"].as_u64().unwrap_or(0);
                 self.out.denied = r["denied_actions"].as_array().into_iter().flatten().filter_map(|d| d["display_name"].as_str().map(String::from)).collect();
                 self.status = Some(if r["status"] == "SUCCESS" { Ok(()) } else { Err(format!("{} {}", r["status"], r["error"].as_str().unwrap_or(""))) });
             }
@@ -493,9 +826,36 @@ impl Collector {
             }
             Some("result") => {
                 self.out.response = ev["result"].as_str().unwrap_or("").to_string();
-                let u = &ev["usage"];
-                self.out.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0) + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                self.out.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+                if let Some(mu) = ev["modelUsage"].as_object().filter(|m| !m.is_empty()) {
+                    let mut inp = 0u64;
+                    let mut cr = 0u64;
+                    let mut cw = 0u64;
+                    let mut out = 0u64;
+                    let mut cost = 0.0f64;
+                    let mut has_cost = false;
+                    for (_, v) in mu {
+                        inp += v["inputTokens"].as_u64().unwrap_or(0);
+                        cr += v["cacheReadInputTokens"].as_u64().unwrap_or(0);
+                        cw += v["cacheCreationInputTokens"].as_u64().unwrap_or(0);
+                        out += v["outputTokens"].as_u64().unwrap_or(0);
+                        if let Some(c) = v["costUSD"].as_f64() {
+                            cost += c;
+                            has_cost = true;
+                        }
+                    }
+                    self.out.input_tokens = inp;
+                    self.out.cache_read_tokens = cr;
+                    self.out.cache_write_tokens = cw;
+                    self.out.output_tokens = out;
+                    self.out.reported_cost_usd = ev["total_cost_usd"].as_f64().or_else(|| has_cost.then_some(cost));
+                } else {
+                    let u = &ev["usage"];
+                    self.out.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                    self.out.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    self.out.cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    self.out.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+                    self.out.reported_cost_usd = ev["total_cost_usd"].as_f64();
+                }
                 self.out.denied = ev["permission_denials"].as_array().into_iter().flatten().filter_map(|d| d["tool_name"].as_str().map(String::from)).collect();
                 self.status = Some(if ev["is_error"] == true { Err(format!("{} {}", ev["subtype"].as_str().unwrap_or("error"), self.out.response)) } else { Ok(()) });
             }
@@ -537,8 +897,14 @@ impl Collector {
             }
             Some("turn.completed") => {
                 let u = &ev["usage"];
-                self.out.input_tokens += u["input_tokens"].as_u64().unwrap_or(0);
-                self.out.output_tokens += u["output_tokens"].as_u64().unwrap_or(0) + u["reasoning_output_tokens"].as_u64().unwrap_or(0);
+                let raw_in = u["input_tokens"].as_u64().unwrap_or(0);
+                let cached = u["cached_input_tokens"].as_u64().unwrap_or(0);
+                let cache_w = u["cache_write_input_tokens"].as_u64().unwrap_or(0);
+                self.out.input_tokens += raw_in.saturating_sub(cached);
+                self.out.cache_read_tokens += cached;
+                self.out.cache_write_tokens += cache_w;
+                self.out.output_tokens += u["output_tokens"].as_u64().unwrap_or(0);
+                self.out.reasoning_tokens += u["reasoning_output_tokens"].as_u64().unwrap_or(0);
                 self.status.get_or_insert(Ok(()));
             }
             Some("turn.failed") => self.status = Some(Err(ev["error"]["message"].as_str().unwrap_or("작업 실패").to_string())),
@@ -546,19 +912,81 @@ impl Collector {
             _ => {}
         }
     }
+
+    fn opencode(&mut self, ev: &Value, on: &mut dyn FnMut(Activity)) {
+        match ev["type"].as_str() {
+            Some("step_start") => {
+                self.step_buf.clear();
+                if self.out.conversation_id.is_none() {
+                    self.out.conversation_id = ev["sessionID"].as_str().map(String::from);
+                    on(Activity::new("thinking", "요청을 읽는 중", false));
+                }
+            }
+            Some("text") => {
+                if let Some(t) = ev["part"]["text"].as_str() {
+                    self.step_buf.push_str(t);
+                    self.all_text.push_str(t);
+                }
+                on(Activity::new("thinking", "정리해서 적는 중", false));
+            }
+            Some("reasoning") => {
+                on(Activity::new("thinking", "생각하는 중", false));
+            }
+            Some("tool_use") => {
+                self.out.tools_used += 1;
+                let tool = ev["part"]["tool"].as_str().unwrap_or("");
+                let state = &ev["part"]["state"];
+                let mut act = tool_activity(tool, &state["input"], true);
+                if state["status"] == "error" {
+                    act.label = format!("{} (실패)", act.label);
+                }
+                on(act);
+            }
+            Some("step_finish") => {
+                let part = &ev["part"];
+                let pid = part["id"].as_str().unwrap_or("").to_string();
+                if pid.is_empty() || self.seen_step_ids.insert(pid) {
+                    let tok = &part["tokens"];
+                    self.out.input_tokens += tok["input"].as_u64().unwrap_or(0);
+                    self.out.cache_read_tokens += tok["cache"]["read"].as_u64().unwrap_or(0);
+                    self.out.cache_write_tokens += tok["cache"]["write"].as_u64().unwrap_or(0);
+                    self.out.output_tokens += tok["output"].as_u64().unwrap_or(0);
+                    self.out.reasoning_tokens += tok["reasoning"].as_u64().unwrap_or(0);
+                    if let Some(c) = part["cost"].as_f64() {
+                        self.cost_accum += c;
+                        self.has_cost = true;
+                    }
+                }
+                if part["reason"] == "stop" {
+                    self.status = Some(Ok(()));
+                }
+            }
+            Some("error") => {
+                let msg = ev["error"]["data"]["message"]
+                    .as_str()
+                    .or_else(|| ev["error"]["message"].as_str())
+                    .or_else(|| ev["message"].as_str())
+                    .unwrap_or("OpenCode 오류");
+                self.status = Some(Err(msg.to_string()));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// 엔진 CLI를 헤드리스로 한 번 실행한다. 반환된 future를 버리면(멈추기) 자식 프로세스도 종료된다.
 pub async fn run(opts: RunOptions<'_>, mut on_activity: impl FnMut(Activity)) -> Result<RunResult> {
+    let started = Instant::now();
     let kind = opts.kind;
     if !kind.can_auto() {
         bail!("{}는 자동 실행을 지원하지 않습니다. 안전 모드로 맡겨 주세요.", kind.label());
     }
     let exe = locate(kind).ok_or_else(|| anyhow!("{} CLI를 찾지 못했습니다. 연결 및 설정을 확인해 주세요.", kind.label()))?;
-    let mut cmd = command(&exe);
+    let mut cmd = command_for(kind, &exe);
     cmd.current_dir(opts.cwd);
     let model = opts.model.as_deref().filter(|m| !m.is_empty());
-    // agy는 네이티브 실행 파일이라 인자로, claude·codex는 .cmd 실행 파일이라 긴 지시를 표준입력으로 보낸다.
+    let mut effective_model: Option<String> = model.map(String::from);
+    // agy는 네이티브 실행 파일이라 인자로, claude·codex·opencode는 표준입력으로 프롬프트를 보낸다.
     let stdin_prompt = match kind {
         Kind::Agy => {
             cmd.arg("-p").arg(&opts.prompt).args(["--output-format", "stream-json"]);
@@ -581,9 +1009,23 @@ pub async fn run(opts: RunOptions<'_>, mut on_activity: impl FnMut(Activity)) ->
             }
             Some(opts.prompt.clone())
         }
+        Kind::Opencode => {
+            let m = model.unwrap_or(OPENCODE_DEFAULT_MODEL);
+            if !m.starts_with("opencode/") && !m.starts_with("opencode-go/") {
+                bail!("OpenCode는 opencode/ 또는 opencode-go/ 모델만 씁니다.");
+            }
+            effective_model = Some(m.to_string());
+            let title_cut: String = opts.title.as_deref().unwrap_or("업무").chars().take(40).collect();
+            let title_arg = format!("일손 · {title_cut}");
+            cmd.args(["run", "--format", "json", "--title", &title_arg, "-m", m]);
+            Some(opts.prompt.clone())
+        }
         Kind::Kiro => unreachable!(),
     };
     cmd.args(level_args(kind, opts.level));
+    for (k, v) in level_env(kind, opts.level) {
+        cmd.env(k, v);
+    }
     if kind == Kind::Codex {
         cmd.arg("-");
     }
@@ -601,15 +1043,25 @@ pub async fn run(opts: RunOptions<'_>, mut on_activity: impl FnMut(Activity)) ->
         s
     });
 
-    let mut col = Collector { out: RunResult::default(), status: None, speaking: false };
+    let mut col = Collector::default();
+    if let Some(m) = effective_model {
+        col.out.model = Some(m);
+    }
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
         if let Ok(ev) = serde_json::from_str::<Value>(&line) {
             col.line(kind, &ev, &mut on_activity);
+        } else {
+            col.raw_line(kind, &line);
         }
     }
     let code = child.wait().await?;
     let stderr = err_task.await.unwrap_or_default();
+    for line in stderr.lines() {
+        col.raw_line(kind, line);
+    }
+    col.finish(kind, code.success());
+    col.out.duration_ms = started.elapsed().as_millis() as u64;
     match col.status {
         Some(Ok(())) => Ok(col.out),
         Some(Err(e)) => bail!(friendly(&format!("{e}\n{stderr}")).unwrap_or_else(|| format!("{} 작업이 끝나지 못했습니다. {}", kind.label(), tail(&format!("{e}\n{stderr}"))))),
@@ -634,6 +1086,7 @@ pub fn handoff_command(kind: Kind, folder: &str, agent: &str, line: &str) -> Str
         Kind::Agy => format!("{cd}agy --agent {agent} -i \"{line}\""),
         Kind::Claude => format!("{cd}claude \"{line}\""),
         Kind::Codex => format!("{cd}codex \"{line}\""),
+        Kind::Opencode => format!("{cd}opencode --agent {agent} --prompt \"{line}\""),
         Kind::Kiro => format!("{cd}kiro-cli chat \"{line}\""),
     }
 }
@@ -644,6 +1097,7 @@ pub fn open_login_terminal(kind: Kind) -> Result<()> {
     let args: &[&str] = match kind {
         Kind::Claude => &["auth", "login"],
         Kind::Codex => &["login"],
+        Kind::Opencode => &["auth", "login"],
         Kind::Kiro => &["login"],
         Kind::Agy => &[],
     };
@@ -712,11 +1166,16 @@ mod tests {
     use super::*;
 
     fn collect(kind: Kind, lines: &[&str]) -> (Collector, Vec<Activity>) {
-        let mut col = Collector { out: RunResult::default(), status: None, speaking: false };
+        let mut col = Collector::default();
         let mut acts = vec![];
         for l in lines {
-            col.line(kind, &serde_json::from_str(l).unwrap(), &mut |a| acts.push(a));
+            if let Ok(ev) = serde_json::from_str::<Value>(l) {
+                col.line(kind, &ev, &mut |a| acts.push(a));
+            } else {
+                col.raw_line(kind, l);
+            }
         }
+        col.finish(kind, true);
         (col, acts)
     }
 
@@ -726,11 +1185,14 @@ mod tests {
         let (col, acts) = collect(Kind::Agy, &[
             r#"{"event":"init","conversation_id":"c1","init":{"model":"gemini-3.8-flash-low","tools":[]}}"#,
             r#"{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":{"TargetFile":"C:\\ws\\src\\hello.txt"}}}}"#,
-            r#"{"event":"result","result":{"status":"SUCCESS","response":"OK\n","usage":{"input_tokens":10,"output_tokens":2,"thinking_tokens":1}}}"#,
+            r#"{"event":"result","result":{"status":"SUCCESS","response":"OK\n","usage":{"input_tokens":10,"cache_read_tokens":4,"output_tokens":2,"thinking_tokens":1}}}"#,
         ]);
         assert!(matches!(col.status, Some(Ok(()))));
         assert_eq!(col.out.response, "OK\n");
-        assert_eq!(col.out.output_tokens, 3);
+        assert_eq!(col.out.input_tokens, 6);
+        assert_eq!(col.out.cache_read_tokens, 4);
+        assert_eq!(col.out.output_tokens, 2);
+        assert_eq!(col.out.reasoning_tokens, 1);
         assert!(acts.iter().any(|a| a.kind == "typing" && a.label.contains("src/hello.txt") && a.notable));
     }
 
@@ -743,12 +1205,15 @@ mod tests {
             r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"npm test","status":"in_progress"}}"#,
             r#"{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"src/app.js","kind":"update"}]}}"#,
             r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"끝났습니다"}}"#,
-            r#"{"type":"turn.completed","usage":{"input_tokens":35523,"output_tokens":5,"reasoning_output_tokens":2}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":35523,"cached_input_tokens":30000,"output_tokens":5,"reasoning_output_tokens":2}}"#,
         ]);
         assert!(matches!(col.status, Some(Ok(()))));
         assert_eq!(col.out.response, "끝났습니다");
         assert_eq!(col.out.conversation_id.as_deref(), Some("t1"));
-        assert_eq!(col.out.output_tokens, 7);
+        assert_eq!(col.out.input_tokens, 5523);
+        assert_eq!(col.out.cache_read_tokens, 30000);
+        assert_eq!(col.out.output_tokens, 5);
+        assert_eq!(col.out.reasoning_tokens, 2);
         assert!(acts.iter().any(|a| a.kind == "running" && a.label.contains("npm test")));
         assert!(acts.iter().any(|a| a.kind == "typing" && a.label.contains("src/app.js")));
     }
@@ -758,11 +1223,15 @@ mod tests {
         let (col, acts) = collect(Kind::Claude, &[
             r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/src/main.ts"}}]}}"#,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"완료","usage":{"input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7},"permission_denials":[{"tool_name":"Bash"}]}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"완료","total_cost_usd":0.012,"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":7},"permission_denials":[{"tool_name":"Bash"}]}"#,
         ]);
         assert!(matches!(col.status, Some(Ok(()))));
         assert_eq!(col.out.response, "완료");
-        assert_eq!(col.out.input_tokens, 105);
+        assert_eq!(col.out.input_tokens, 5);
+        assert_eq!(col.out.cache_read_tokens, 100);
+        assert_eq!(col.out.cache_write_tokens, 20);
+        assert_eq!(col.out.output_tokens, 7);
+        assert_eq!(col.out.reported_cost_usd, Some(0.012));
         assert_eq!(col.out.denied, vec!["Bash".to_string()]);
         assert!(acts.iter().any(|a| a.kind == "typing" && a.label.contains("src/main.ts")));
 
@@ -772,11 +1241,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_opencode_stream() {
+        let (col, acts) = collect(Kind::Opencode, &[
+            r#"{"type":"step_start","timestamp":1760000001,"sessionID":"ses_1","part":{"id":"prt_1","type":"step-start"}}"#,
+            r#"{"type":"tool_use","timestamp":1760000002,"sessionID":"ses_1","part":{"id":"prt_2","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"src/index.ts"}}}}"#,
+            r#"permission requested: bash (ls -la); auto-rejecting"#,
+            r#"{"type":"step_finish","timestamp":1760000003,"sessionID":"ses_1","part":{"id":"prt_3","type":"step-finish","reason":"tool-calls","cost":0,"tokens":{"total":1200,"input":900,"output":50,"reasoning":20,"cache":{"read":250,"write":0}}}}"#,
+            r#"{"type":"step_start","timestamp":1760000004,"sessionID":"ses_1","part":{"id":"prt_4","type":"step-start"}}"#,
+            r#"{"type":"text","timestamp":1760000005,"sessionID":"ses_1","part":{"id":"prt_5","type":"text","text":"안녕하세요, 일손입니다."}}"#,
+            r#"{"type":"step_finish","timestamp":1760000006,"sessionID":"ses_1","part":{"id":"prt_6","type":"step-finish","reason":"stop","cost":0,"tokens":{"total":1500,"input":300,"output":40,"reasoning":10,"cache":{"read":1150,"write":0}}}}"#,
+        ]);
+        assert!(matches!(col.status, Some(Ok(()))));
+        assert_eq!(col.out.conversation_id.as_deref(), Some("ses_1"));
+        assert_eq!(col.out.response, "안녕하세요, 일손입니다.");
+        assert_eq!(col.out.input_tokens, 1200);
+        assert_eq!(col.out.cache_read_tokens, 1400);
+        assert_eq!(col.out.output_tokens, 90);
+        assert_eq!(col.out.reasoning_tokens, 30);
+        assert_eq!(col.out.reported_cost_usd, Some(0.0));
+        assert_eq!(col.out.denied, vec!["bash".to_string()]);
+        assert!(acts.iter().any(|a| a.kind == "typing" && a.label.contains("src/index.ts")));
+    }
+
+    #[test]
+    fn opencode_permission_json_is_valid() {
+        for lvl in [Level::ReadOnly, Level::Edit, Level::Sandbox, Level::Yolo] {
+            let envs = level_env(Kind::Opencode, lvl);
+            assert_eq!(envs.len(), 1);
+            assert_eq!(envs[0].0, "OPENCODE_PERMISSION");
+            let parsed: Value = serde_json::from_str(&envs[0].1).expect("OPENCODE_PERMISSION must be valid JSON");
+            assert!(parsed.is_object());
+        }
+        assert!(is_opencode_secret_env("GROQ_API_KEY"));
+        assert!(is_opencode_secret_env("CUSTOM_SERVICE_KEY"));
+        assert!(is_opencode_secret_env("GITHUB_TOKEN"));
+        assert!(!is_opencode_secret_env("OPENCODE_DISABLE_AUTOUPDATE"));
+        assert!(!is_opencode_secret_env("PATH"));
+        assert!(!is_opencode_secret_env("APPDATA"));
+    }
+
+    #[test]
     fn yolo_flags_match_each_cli() {
         assert_eq!(level_args(Kind::Agy, Level::Yolo), vec!["--dangerously-skip-permissions"]);
         assert_eq!(level_args(Kind::Claude, Level::Yolo), vec!["--dangerously-skip-permissions"]);
         assert_eq!(level_args(Kind::Codex, Level::Yolo), vec!["--dangerously-bypass-approvals-and-sandbox"]);
+        assert_eq!(level_args(Kind::Opencode, Level::Yolo), vec!["--auto"]);
         assert_eq!(level_args(Kind::Codex, Level::ReadOnly), vec!["-s", "read-only"]);
     }
 }
-

@@ -52,7 +52,15 @@ pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value>
             e["availability"] = availability(&conn, &e, &settings, &engines, &tasks);
             if roster::requirements(&id).contains(&"agy") {
                 let kind = settings.engine_for(&id);
-                e["engine"] = json!({ "id": kind.id(), "label": kind.label(), "auto": settings.auto_ok(kind) && settings.engine_mode == "auto" });
+                let model = settings.model_for(kind).unwrap_or_else(|| crate::pricing::default_model_for(kind.id()).to_string());
+                let free = crate::pricing::resolve(kind.id(), Some(&model)).map(|p| p.list_cost_zero).unwrap_or(false);
+                e["engine"] = json!({
+                    "id": kind.id(),
+                    "label": kind.label(),
+                    "auto": settings.auto_ok(kind) && settings.engine_mode == "auto",
+                    "model": model,
+                    "free": free,
+                });
             }
             e
         })
@@ -64,10 +72,10 @@ pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value>
         "engines": engine::ALL.iter().map(|k| engines.get(k.id()).cloned().map(|s| json!(s)).unwrap_or_else(|| json!({ "id": k.id(), "label": k.label(), "plan": k.plan(), "canAuto": k.can_auto(), "installed": false, "signedIn": false, "models": [], "message": "확인 중" }))).collect::<Vec<_>>(),
         "levels": engine::ALL.iter().map(|k| json!({
             "engine": k.id(),
-            "readOnly": engine::level_args(*k, engine::Level::ReadOnly).join(" "),
-            "edit": engine::level_args(*k, engine::Level::Edit).join(" "),
-            "sandbox": engine::level_args(*k, engine::Level::Sandbox).join(" "),
-            "yolo": engine::level_args(*k, engine::Level::Yolo).join(" "),
+            "readOnly": engine::level_display(*k, engine::Level::ReadOnly),
+            "edit": engine::level_display(*k, engine::Level::Edit),
+            "sandbox": engine::level_display(*k, engine::Level::Sandbox),
+            "yolo": engine::level_display(*k, engine::Level::Yolo),
         })).collect::<Vec<_>>(),
         "dataDir": data_dir,
         "version": app.package_info().version.to_string(),
@@ -81,9 +89,25 @@ pub fn list_tasks(state: State<'_, AppState>) -> CmdResult<Vec<Task>> {
 }
 
 #[tauri::command]
-pub fn get_task(state: State<'_, AppState>, id: String) -> CmdResult<Task> {
+pub fn get_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Task> {
     let conn = state.db.lock().unwrap();
-    db::get_task(&conn, &id).map_err(err)
+    let mut task = db::get_task(&conn, &id).map_err(err)?;
+    if task.status == status::COMPLETED && task.seen_at.is_none() {
+        let _ = db::mark_task_seen(&conn, &id);
+        task.seen_at = Some(db::now());
+        drop(conn);
+        runner::emit(&app, &id);
+    }
+    Ok(task)
+}
+
+#[tauri::command]
+pub fn mark_task_seen(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let conn = state.db.lock().unwrap();
+    db::mark_task_seen(&conn, &id).map_err(err)?;
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -134,6 +158,7 @@ pub fn create_task(app: AppHandle, state: State<'_, AppState>, employee_id: Stri
             error: None,
             created_at: now.clone(),
             updated_at: now,
+            seen_at: None,
             steps: vec![],
             events: vec![],
         };
@@ -268,13 +293,14 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdResul
 
 /// 모든 구독 엔진의 설치·로그인 상태를 함께 확인한다 (사용량을 쓰지 않는다).
 pub async fn check_engines() -> Engines {
-    let (a, b, c, d) = tokio::join!(
+    let (a, b, c, d, e) = tokio::join!(
         engine::status(engine::Kind::Agy),
         engine::status(engine::Kind::Claude),
         engine::status(engine::Kind::Codex),
+        engine::status(engine::Kind::Opencode),
         engine::status(engine::Kind::Kiro)
     );
-    [a, b, c, d].into_iter().map(|s| (s.id.clone(), s)).collect()
+    [a, b, c, d, e].into_iter().map(|s| (s.id.clone(), s)).collect()
 }
 
 #[tauri::command]
@@ -372,4 +398,54 @@ pub fn acknowledge_guard(state: State<'_, AppState>, employee_id: String) -> Cmd
 #[tauri::command]
 pub fn save_text_file(path: String, contents: String) -> CmdResult<()> {
     std::fs::write(&path, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))
+}
+
+#[tauri::command]
+pub fn usage_summary(state: State<'_, AppState>, range: Option<String>) -> CmdResult<crate::usage::UsageSummary> {
+    let conn = state.db.lock().unwrap();
+    let settings = db::load_settings(&conn).map_err(err)?;
+    crate::usage::summary(&conn, &settings, range.as_deref().unwrap_or("30d")).map_err(err)
+}
+
+#[tauri::command]
+pub fn usage_for_task(state: State<'_, AppState>, id: String) -> CmdResult<Vec<crate::usage::UsageRow>> {
+    let conn = state.db.lock().unwrap();
+    let settings = db::load_settings(&conn).map_err(err)?;
+    crate::usage::for_task(&conn, &id, settings.effective_usd_krw()).map_err(err)
+}
+
+#[tauri::command]
+pub fn estimate_task(state: State<'_, AppState>, employee_id: String, input: Value) -> CmdResult<crate::usage::Estimate> {
+    let conn = state.db.lock().unwrap();
+    let settings = db::load_settings(&conn).map_err(err)?;
+    crate::usage::estimate(&conn, &settings, &employee_id, &input).map_err(err)
+}
+
+#[tauri::command]
+pub async fn quota_status(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<Vec<crate::quota::EngineQuota>> {
+    crate::quota::check_all(&state, refresh.unwrap_or(false)).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn refresh_fx(state: State<'_, AppState>) -> CmdResult<Settings> {
+    let mut settings = {
+        let conn = state.db.lock().unwrap();
+        db::load_settings(&conn).map_err(err)?
+    };
+    if let Ok(resp) = state
+        .http
+        .get("https://open.er-api.com/v6/latest/USD")
+        .send()
+        .await
+    {
+        if let Ok(json) = resp.json::<Value>().await {
+            if let Some(krw) = json["rates"]["KRW"].as_f64().filter(|&v| v > 500.0 && v < 5000.0) {
+                settings.usd_krw = (krw * 100.0).round() / 100.0;
+                settings.fx_updated_at = Some(db::now());
+                let conn = state.db.lock().unwrap();
+                let _ = db::save_settings(&conn, &settings);
+            }
+        }
+    }
+    Ok(settings)
 }

@@ -266,14 +266,40 @@ fn pages_block(pages: &Value) -> String {
     out
 }
 
-/// 비용 견적과 실제 호출이 같은 요청을 쓰도록 한 곳에서 만든다. (요청, 보통 출력 토큰 수)
-fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
-    let s = &ctx.settings;
-    let searches = ctx.n("webSearch", 0).clamp(0, 10) as u32;
-    let (system, user, _typical) = match ctx.employee_id.as_str() {
+fn val_s(input: &Value, key: &str) -> String {
+    match &input[key] {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn val_n(input: &Value, key: &str, default: i64) -> i64 {
+    match &input[key] {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .unwrap_or(default)
+}
+
+fn val_b(input: &Value, key: &str, default: bool) -> bool {
+    input[key].as_bool().unwrap_or(default)
+}
+
+/// 비용 견적과 실제 호출이 같은 요청을 쓰도록 한 곳에서 만든다. (요청, 웹 검색 횟수, 보통 출력 토큰 수)
+pub(crate) fn ai_request_from_input(
+    s: &Settings,
+    employee_id: &str,
+    input: &Value,
+    outputs: &HashMap<String, Value>,
+) -> Result<(String, u32, u32)> {
+    let searches = val_n(input, "webSearch", 0).clamp(0, 10) as u32;
+    let out_val = |key: &str| outputs.get(key).unwrap_or(&Value::Null);
+    let (system, user, typical) = match employee_id {
         "harin" => {
             let template = choice_label(
-                &ctx.s("template"),
+                &val_s(input, "template"),
                 &[
                     ("info", "정보 정리형 — 목차와 비교표로 궁금증을 풀어 준다"),
                     ("review", "경험·후기형 — 방문 전후 이야기로 신뢰를 쌓는다"),
@@ -281,25 +307,25 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
                     ("list", "추천 리스트형 — 고르는 기준과 추천 목록으로 정리한다"),
                 ],
             );
-            let length = ctx.n("length", 1500);
+            let length = val_n(input, "length", 1500);
             let mut user = format!(
                 "[요청]\n- 핵심 키워드: {}\n{}- 글 스타일: {template}\n- 분량: 본문 약 {length}자\n{}{}",
-                ctx.s("keyword"),
-                opt_line("보조 키워드", &ctx.s("subKeywords")),
-                opt_line("마무리 행동 유도", &ctx.s("cta")),
-                opt_line("읽는 사람", &ctx.s("audience")),
+                val_s(input, "keyword"),
+                opt_line("보조 키워드", &val_s(input, "subKeywords")),
+                opt_line("마무리 행동 유도", &val_s(input, "cta")),
+                opt_line("읽는 사람", &val_s(input, "audience")),
             );
-            let facts = ctx.s("facts");
+            let facts = val_s(input, "facts");
             user.push_str(&format!("\n[꼭 들어갈 사실]\n{}\n", if facts.is_empty() { "(없음 — 사실이 필요한 곳은 [확인 필요]로 남길 것)" } else { &facts }));
             user.push_str(&format!("\n[사업장]\n{}\n", business_block(s)));
-            if ctx.b("useBrandStyle", true) {
+            if val_b(input, "useBrandStyle", true) {
                 user.push_str(&format!("\n[브랜드 문체]\n{}\n", brand_block(s)));
             }
             (HARIN_SYSTEM.to_string(), user, (length as f64 * 1.4) as u32 + 2500)
         }
         "seojin" => {
             let purpose = choice_label(
-                &ctx.s("purpose"),
+                &val_s(input, "purpose"),
                 &[
                     ("compare", "경쟁사 비교 — 포지션·가격대·강점·빈틈을 비교표로"),
                     ("trend", "시장·트렌드 — 최근 변화와 근거, 사장님께 주는 의미"),
@@ -307,11 +333,11 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
                     ("factcheck", "사실 확인 — 주장별로 맞음/틀림/근거 부족 판정"),
                 ],
             );
-            let collected = ctx.out("collect");
+            let collected = out_val("collect");
             let mut user = format!(
                 "[조사 주제]\n{}\n\n[조사 목적]\n{purpose}\n{}",
-                ctx.s("topic"),
-                opt_line("꼭 알고 싶은 점", &ctx.s("focus")),
+                val_s(input, "topic"),
+                opt_line("꼭 알고 싶은 점", &val_s(input, "focus")),
             );
             user.push_str(&format!("\n[사장님 사업장]\n{}\n", business_block(s)));
             let pages = pages_block(&collected["pages"]);
@@ -326,7 +352,7 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
         }
         "minjae" => {
             let channel = choice_label(
-                &ctx.s("channel"),
+                &val_s(input, "channel"),
                 &[
                     ("email", "이메일 (제목 포함, 5문장 이내)"),
                     ("blog", "블로그 이웃 신청·댓글 (2문장 이내, 광고 티 나지 않게)"),
@@ -336,13 +362,13 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
             );
             let mut user = format!(
                 "[우리가 파는 것]\n{}\n\n[찾는 고객]\n{}\n{}- 첫 연락 채널: {channel}\n- 찾을 후보 수: {}곳\n{}",
-                ctx.s("offering"),
-                ctx.s("target"),
-                opt_line("지역", &ctx.s("region")),
-                ctx.n("count", 10),
-                opt_line("우리만의 강점", &ctx.s("strength")),
+                val_s(input, "offering"),
+                val_s(input, "target"),
+                opt_line("지역", &val_s(input, "region")),
+                val_n(input, "count", 10),
+                opt_line("우리만의 강점", &val_s(input, "strength")),
             );
-            let candidates = ctx.s("candidates");
+            let candidates = val_s(input, "candidates");
             if !candidates.is_empty() {
                 user.push_str(&format!("\n[이미 가진 후보 목록 — 이 후보들의 우선순위도 함께 매길 것]\n{candidates}\n"));
             }
@@ -350,12 +376,12 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
             if searches == 0 {
                 user.push_str("\n웹 검색 없이 진행한다. 실제 상호를 지어내지 말고, 후보 유형과 찾는 방법·검색어를 중심으로 정리한다.\n");
             }
-            let count = ctx.n("count", 10) as u32;
+            let count = val_n(input, "count", 10) as u32;
             (MINJAE_SYSTEM.to_string(), user, 2000 + count * 250)
         }
         "jiho" => {
             let objective = choice_label(
-                &ctx.s("objective"),
+                &val_s(input, "objective"),
                 &[
                     ("save", "저장 유도 — 꿀팁형으로 저장·공유를 부른다"),
                     ("inquiry", "문의 전환 — 고민을 짚고 상담 문의로 이어 간다"),
@@ -364,41 +390,44 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
                 ],
             );
             let platform = choice_label(
-                &ctx.s("platform"),
+                &val_s(input, "platform"),
                 &[("reels", "인스타그램 릴스"), ("shorts", "유튜브 쇼츠"), ("tiktok", "틱톡")],
             );
-            let variants = ctx.n("variants", 3).clamp(1, 3);
+            let variants = val_n(input, "variants", 3).clamp(1, 3);
             let mut user = format!(
                 "[요청]\n- 주제: {}\n- 목적: {objective}\n- 플랫폼: {platform}\n- 길이: {}초\n- 대본 수: {variants}안\n{}{}",
-                ctx.s("topic"),
-                ctx.n("duration", 30),
-                opt_line("보는 사람", &ctx.s("target")),
-                opt_line("참고하고 싶은 점", &ctx.s("reference")),
+                val_s(input, "topic"),
+                val_n(input, "duration", 30),
+                opt_line("보는 사람", &val_s(input, "target")),
+                opt_line("참고하고 싶은 점", &val_s(input, "reference")),
             );
             user.push_str(&format!("\n[사업장]\n{}\n\n[브랜드 문체]\n{}\n", business_block(s), brand_block(s)));
             (JIHO_SYSTEM.to_string(), user, 1200 + variants as u32 * 900)
         }
         "yena" => {
-            let collected = ctx.out("collect");
+            let collected = out_val("collect");
             let age = choice_label(
-                &ctx.s("bizAge"),
+                &val_s(input, "bizAge"),
                 &[("pre", "예비창업"), ("0-1", "1년 미만"), ("1-3", "1~3년"), ("3-7", "3~7년"), ("7+", "7년 이상")],
             );
             let headcount = choice_label(
-                &ctx.s("headcount"),
+                &val_s(input, "headcount"),
                 &[("0", "대표 1인"), ("1-4", "1~4명"), ("5-9", "5~9명"), ("10+", "10명 이상")],
             );
             let revenue = choice_label(
-                &ctx.s("revenue"),
+                &val_s(input, "revenue"),
                 &[("none", "매출 없음"), ("lt1", "1억 미만"), ("1-10", "1억~10억"), ("10+", "10억 이상")],
             );
             let mut user = format!(
                 "[우리 회사]\n{}\n- 업력: {age}\n- 상시 근로자: {headcount}\n- 작년 매출: {revenue}\n{}",
                 business_block(s),
-                opt_line("보유 인증·특이사항", &ctx.s("extra")),
+                opt_line("보유 인증·특이사항", &val_s(input, "extra")),
             );
             user.push_str(&format!("\n[공고 자료]{}\n", pages_block(&collected["pages"])));
-            let text = collected["noticeText"].as_str().unwrap_or("");
+            let text = collected["noticeText"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| val_s(input, "noticeText"));
             if !text.is_empty() {
                 user.push_str(&format!("\n[사장님이 붙여 넣은 공고 본문]\n\"\"\"\n{text}\n\"\"\"\n"));
             }
@@ -409,7 +438,11 @@ fn ai_request(ctx: &Ctx) -> Result<(String, u32)> {
         }
         other => bail!("AI 단계가 없는 직원입니다: {other}"),
     };
-    Ok((format!("{system}\n\n---\n{user}"), searches))
+    Ok((format!("{system}\n\n---\n{user}"), searches, typical))
+}
+
+pub(crate) fn ai_request(ctx: &Ctx) -> Result<(String, u32, u32)> {
+    ai_request_from_input(&ctx.settings, &ctx.employee_id, &ctx.input, &ctx.outputs)
 }
 
 // ───────────────────────── 실행 방식: 안전 모드 / 자동 모드 ─────────────────────────
@@ -465,6 +498,14 @@ fn persona(id: &str) -> String {
     )
 }
 
+pub(crate) fn persona_text(id: &str) -> String {
+    persona(id)
+}
+
+pub(crate) fn rules_preview(allow_run: bool, actor: &str) -> String {
+    rules(allow_run, false, actor)
+}
+
 /// 끝맺음 규칙: 자동 모드는 답변으로, 안전 모드는 보고서 파일로 결과를 남긴다.
 fn finish_rule(safe: bool, actor: &str, read_only: bool) -> String {
     if safe {
@@ -491,7 +532,7 @@ fn rules(allow_run: bool, safe: bool, actor: &str) -> String {
 
 /// 사장님이 직접 실행할 때 팀원을 서브에이전트로 부를 수 있는 엔진인지.
 fn supports_subagents(kind: Kind) -> bool {
-    matches!(kind, Kind::Agy | Kind::Claude)
+    matches!(kind, Kind::Agy | Kind::Claude | Kind::Opencode)
 }
 
 fn plan_text(ctx: &Ctx) -> String {
@@ -557,7 +598,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
 
     let business = matches!((emp, key), ("harin", "write") | ("seojin", "analyze") | ("minjae", "research") | ("jiho", "write") | ("yena", "analyze"));
     if business {
-        let (prompt, searches) = ai_request(ctx)?;
+        let (prompt, searches, _) = ai_request(ctx)?;
         let tail = if safe_for(emp) {
             format!("\n\n---\n{}\n그 밖의 파일은 만들거나 고치지 말고, 셸 명령도 실행하지 않는다.", finish_rule(true, emp, true))
         } else {
@@ -764,8 +805,37 @@ fn claude_agent_file(id: &str) -> String {
     )
 }
 
+/// OpenCode 에이전트 정의 (.opencode/agents/ilson-*.md).
+fn opencode_agent_file(id: &str, team: &[String], lead: bool, model: &str, allow_run: bool) -> String {
+    let e = roster::find(id).unwrap_or(Value::Null);
+    let is_dev = roster::DEV_TEAM.contains(&id);
+    let can_edit = is_dev && id != "minhyuk";
+    let can_bash = can_edit && allow_run && id != "daeun";
+    let can_web = !is_dev;
+    let mode = if lead { "primary" } else { "subagent" };
+    let mut body = if is_dev {
+        rules(can_bash, true, id)
+    } else {
+        finish_rule(true, id, true)
+    };
+    if lead && team.len() > 1 {
+        body.push_str("\n\n팀원은 `@ilson-<id>`로 부른다.");
+    }
+    format!(
+        "---\ndescription: 일손의 {} {}. {}\nmode: {mode}\nmodel: {model}\npermission:\n  edit: {}\n  bash: {}\n  webfetch: {}\n  websearch: {}\n  external_directory: deny\n---\n{}\n\n{body}\n",
+        e["role"].as_str().unwrap_or(""),
+        e["name"].as_str().unwrap_or(id),
+        e["summary"].as_str().unwrap_or(""),
+        if can_edit { "allow" } else { "deny" },
+        if can_bash { "allow" } else { "deny" },
+        if can_web { "allow" } else { "deny" },
+        if can_web { "allow" } else { "deny" },
+        persona(id)
+    )
+}
+
 /// 안전 모드: 에이전트 정의와 지시서를 작업 폴더에 쓰고, 이전 보고서는 치운다.
-fn prepare_handoff(job: &AiJob) -> Result<()> {
+fn prepare_handoff(ctx: &Ctx, job: &AiJob) -> Result<()> {
     let progress = job.cwd.join(PROGRESS_DIR);
     std::fs::create_dir_all(&progress)?;
     let mut team = job.team.clone();
@@ -787,9 +857,28 @@ fn prepare_handoff(job: &AiJob) -> Result<()> {
                 std::fs::write(agents_dir.join(format!("ilson-{id}.md")), claude_agent_file(id))?;
             }
         }
+        Kind::Opencode => {
+            let agents_dir = job.cwd.join(".opencode").join("agents");
+            std::fs::create_dir_all(&agents_dir)?;
+            let model = ctx
+                .settings
+                .model_for(Kind::Opencode)
+                .unwrap_or_else(|| engine::OPENCODE_DEFAULT_MODEL.to_string());
+            let allow_run = ctx.b("allowRun", false);
+            for id in &team {
+                std::fs::write(
+                    agents_dir.join(format!("ilson-{id}.md")),
+                    opencode_agent_file(id, &team, *id == job.actor, &model, allow_run),
+                )?;
+            }
+        }
         _ => {}
     }
-    std::fs::write(progress.join("TASK.md"), &job.prompt)?;
+    let mut prompt = job.prompt.clone();
+    if job.engine == Kind::Opencode && team.len() > 1 {
+        prompt.push_str("\n\n팀원은 `@ilson-<id>`로 부른다.");
+    }
+    std::fs::write(progress.join("TASK.md"), &prompt)?;
     for entry in std::fs::read_dir(&progress)? {
         let p = entry?.path();
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -804,7 +893,7 @@ const START_LINE: &str = ".ilson/TASK.md 파일의 지시를 처음부터 끝까
 
 fn handoff_gate(ctx: &Ctx, key: &str) -> Result<Option<Gate>> {
     let Plan::Ai(job) = plan(ctx, key)? else { return Ok(None) };
-    prepare_handoff(&job)?;
+    prepare_handoff(ctx, &job)?;
     let folder = job.cwd.to_string_lossy().to_string();
     let agent = format!("ilson-{}", job.actor);
     let name = name_of(&job.actor);
@@ -814,6 +903,11 @@ fn handoff_gate(ctx: &Ctx, key: &str) -> Result<Option<Gate>> {
         vec![
             "1. ‘Antigravity 열기’로 작업 폴더를 엽니다 (터미널을 쓴다면 ‘터미널 명령 복사’).".to_string(),
             format!("2. 에이전트에게 이렇게 말합니다: “{say}”"),
+        ]
+    } else if kind == Kind::Opencode {
+        vec![
+            "1. ‘터미널 열기’ → ‘터미널 명령 복사’(OpenCode 화면이 열리고 지시가 자동 입력됩니다).".to_string(),
+            "2. OpenCode 터미널에 복사한 명령을 붙여 넣고 엔터를 누릅니다.".to_string(),
         ]
     } else {
         vec![
@@ -927,42 +1021,116 @@ struct JobOut {
     markdown: String,
     model: Option<String>,
     note: String,
+    cost_usd: f64,
 }
 
-async fn run_job(ctx: &Ctx, job: &AiJob) -> Result<JobOut> {
+async fn run_job(ctx: &Ctx, step_key: &str, job: &AiJob) -> Result<JobOut> {
+    let state = ctx.app.state::<AppState>();
+    let prompt_chars = job.prompt.chars().count() as u64;
+    let est_input = crate::usage::estimate_prompt_tokens(job.engine, &job.prompt);
+
     if handoff_for(ctx, &job.actor) {
         let (markdown, model) = watch_external(ctx, job).await?;
-        return Ok(JobOut { markdown, note: format!("{model}에서 실행", ), model: Some(model) });
+        if let Ok(conn) = state.db.lock() {
+            let _ = crate::usage::record(
+                &conn,
+                ctx,
+                step_key,
+                job,
+                &crate::usage::Usage::default(),
+                ctx.settings.model_for(job.engine).as_deref(),
+                "safe",
+                Some(est_input),
+                Some(prompt_chars),
+                "safe",
+            );
+        }
+        return Ok(JobOut {
+            markdown,
+            note: format!("{model}에서 실행"),
+            model: Some(model),
+            cost_usd: 0.0,
+        });
     }
-    // 자동 모드: 한 번에 한 업무만 agy를 실행한다.
-    let state = ctx.app.state::<AppState>();
+    // 자동 모드: 한 번에 한 업무만 AI 엔진을 실행한다.
     let _turn = state.engine_lock.lock().await;
     let actor = job.actor.clone();
     // YOLO 스위치가 켜져 있으면 파일을 고치는 단계는 모든 확인을 생략한다.
     let level = if ctx.settings.yolo && job.level != Level::ReadOnly { Level::Yolo } else { job.level };
+    let configured_model = ctx.settings.model_for(job.engine);
     let r = engine::run(
-        engine::RunOptions { kind: job.engine, cwd: &job.cwd, prompt: job.prompt.clone(), model: ctx.settings.model_for(job.engine), level },
+        engine::RunOptions {
+            kind: job.engine,
+            cwd: &job.cwd,
+            prompt: job.prompt.clone(),
+            model: configured_model.clone(),
+            level,
+            title: Some(ctx.title.clone()),
+        },
         |a| ctx.report(&actor, &a),
     )
     .await?;
+
+    let (eff_model, model_source) = if let Some(ref m) = r.model {
+        let src = if job.engine == Kind::Opencode {
+            if ctx.settings.models.get("opencode").is_some_and(|s| !s.trim().is_empty()) {
+                "settings"
+            } else {
+                "default"
+            }
+        } else {
+            "reported"
+        };
+        (Some(m.clone()), src)
+    } else if let Some(ref cm) = configured_model {
+        (Some(cm.clone()), "settings")
+    } else {
+        (
+            Some(crate::pricing::default_model_for(job.engine.id()).to_string()),
+            "default",
+        )
+    };
+
+    let usage = crate::usage::Usage::from(&r);
+    let cost_usd = if let Ok(conn) = state.db.lock() {
+        crate::usage::record(
+            &conn,
+            ctx,
+            step_key,
+            job,
+            &usage,
+            eff_model.as_deref(),
+            model_source,
+            Some(est_input),
+            Some(prompt_chars),
+            "auto",
+        )
+        .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
     let mut note = format!(
-        "{} {} · {} · 입력 {}토큰 · 출력 {}토큰 · 구독 사용",
+        "{} {} · {}",
         job.engine.label(),
-        r.model.clone().unwrap_or_default(),
-        level.label(),
-        won(r.input_tokens as i64),
-        won(r.output_tokens as i64)
+        eff_model.clone().unwrap_or_default(),
+        level.label()
     );
     if !r.denied.is_empty() {
         note.push_str(&format!(" · 거부된 동작: {}", r.denied.join(", ")));
     }
-    Ok(JobOut { markdown: r.response.trim().to_string(), model: r.model, note })
+    Ok(JobOut {
+        markdown: r.response.trim().to_string(),
+        model: eff_model,
+        note,
+        cost_usd,
+    })
 }
 
 /// AI 단계를 실행하고 결과를 정리한다 (커밋, 리뷰 판정 등).
 async fn ai_step(ctx: &Ctx, key: &str, job: AiJob) -> Result<StepResult> {
     std::fs::create_dir_all(&job.cwd)?;
-    let out = run_job(ctx, &job).await?;
+    let out = run_job(ctx, key, &job).await?;
     if out.markdown.trim().is_empty() {
         bail!("AI가 빈 결과를 돌려주었습니다. 이어하기로 다시 시도해 주세요.");
     }
@@ -985,7 +1153,7 @@ async fn ai_step(ctx: &Ctx, key: &str, job: AiJob) -> Result<StepResult> {
             note = format!("판정: {v} · {note}");
         }
     }
-    Ok(StepResult { output, note: Some(note), cost_usd: 0.0 })
+    Ok(StepResult { output, note: Some(note), cost_usd: out.cost_usd })
 }
 
 // ───────────────────────── 확인(게이트) ─────────────────────────

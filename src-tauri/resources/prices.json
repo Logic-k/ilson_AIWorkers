@@ -1,0 +1,226 @@
+{
+  "generated_at": "2026-10-16",
+  "source": "models.dev api.json (MIT) + LiteLLM model_prices_and_context_window.json (MIT)",
+  "unit": "USD per 1M tokens",
+  "models": {
+    "anthropic/claude-opus-5-5": {
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.20,
+      "cache_write": 5.0,
+      "context": 200000,
+      "output_limit": 32000
+    },
+    "anthropic/claude-sonnet-5-5": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.10,
+      "cache_write": 2.50,
+      "context": 200000,
+      "output_limit": 32000
+    },
+    "anthropic/claude-haiku-5-5": {
+      "input": 0.10,
+      "output": 0.50,
+      "cache_read": 0.01,
+      "cache_write": 0.125,
+      "context": 200000,
+      "output_limit": 16000
+    },
+    "anthropic/claude-opus-4-6": {
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.20,
+      "cache_write": 5.0,
+      "context": 200000,
+      "output_limit": 32000
+    },
+    "anthropic/claude-sonnet-4-6": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.10,
+      "cache_write": 2.50,
+      "context": 200000,
+      "output_limit": 32000
+    },
+    "anthropic/claude-haiku-4-5": {
+      "input": 0.10,
+      "output": 0.50,
+      "cache_read": 0.01,
+      "cache_write": 0.125,
+      "context": 200000,
+      "output_limit": 16000
+    },
+    "openai/gpt-6.1-sol": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.10,
+      "cache_write": 2.0,
+      "context": 400000,
+      "output_limit": 128000
+    },
+    "openai/gpt-5.3-codex": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.10,
+      "cache_write": 2.0,
+      "context": 400000,
+      "output_limit": 128000
+    },
+    "openai/gpt-5.2-codex": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.10,
+      "cache_write": 2.0,
+      "context": 400000,
+      "output_limit": 128000
+    },
+    "openai/o3": {
+      "input": 2.0,
+      "output": 8.0,
+      "cache_read": 0.50,
+      "cache_write": 2.0,
+      "context": 200000,
+      "output_limit": 100000
+    },
+    "openai/o4-mini": {
+      "input": 1.10,
+      "output": 4.40,
+      "cache_read": 0.275,
+      "cache_write": 1.10,
+      "context": 200000,
+      "output_limit": 100000
+    },
+    "google/gemini-3.8-flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
+      "cache_write": 0.75,
+      "context": 1048576,
+      "output_limit": 65536
+    },
+    "google/gemini-4-argon": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.20,
+      "cache_write": 2.0,
+      "context": 2097152,
+      "output_limit": 65536
+    },
+    "google/gemini-3.1-pro": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.20,
+      "cache_write": 2.0,
+      "context": 2097152,
+      "output_limit": 65536
+    },
+    "google/gemini-2.5-pro": {
+      "input": 1.25,
+      "output": 10.0,
+      "cache_read": 0.3125,
+      "cache_write": 1.25,
+      "context": 1048576,
+      "output_limit": 65536
+    },
+    "google/gemini-2.5-flash": {
+      "input": 0.30,
+      "output": 2.50,
+      "cache_read": 0.075,
+      "cache_write": 0.30,
+      "context": 1048576,
+      "output_limit": 65536
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "input": 0.30,
+      "output": 1.20,
+      "cache_read": 0.006,
+      "cache_write": 0.30,
+      "context": 1000000,
+      "output_limit": 32000
+    },
+    "opencode/deepseek-v4.1-flash": {
+      "input": 0.30,
+      "output": 1.20,
+      "cache_read": 0.006,
+      "cache_write": 0.30,
+      "context": 1000000,
+      "output_limit": 32000
+    },
+    "opencode/deepseek-v4.1-flash-free": {
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "context": 200000,
+      "output_limit": 32000,
+      "free": true,
+      "sibling": "opencode/deepseek-v4.1-flash"
+    },
+    "opencode-go/deepseek-v4.1-flash": {
+      "input": 0.15,
+      "output": 0.60,
+      "cache_read": 0.006,
+      "cache_write": 0.15,
+      "context": 1000000,
+      "output_limit": 32000
+    },
+    "opencode/glm-5.3-flash": {
+      "input": 0.20,
+      "output": 0.80,
+      "cache_read": 0.01,
+      "cache_write": 0.20,
+      "context": 200000,
+      "output_limit": 32000
+    },
+    "opencode/glm-5.3-flash-free": {
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "context": 200000,
+      "output_limit": 32000,
+      "free": true,
+      "sibling": "opencode/glm-5.3-flash"
+    },
+    "opencode/nemotron-3.5-super-vl": {
+      "input": 0.30,
+      "output": 1.20,
+      "cache_read": 0.03,
+      "cache_write": 0.30,
+      "context": 128000,
+      "output_limit": 32000
+    },
+    "opencode/nemotron-3.5-super-vl-free": {
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "context": 128000,
+      "output_limit": 32000,
+      "free": true,
+      "sibling": "opencode/nemotron-3.5-super-vl"
+    },
+    "opencode/big-pickle": {
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "context": 200000,
+      "output_limit": 32000,
+      "free": true,
+      "sibling": "opencode/deepseek-v4.1-flash"
+    }
+  },
+  "overrides": {
+    "deepseek/deepseek-v4.1-flash": {
+      "note": "DeepSeek V4.1 Flash 피크 정가 기준 ($0.30/$1.20, 캐시 $0.006). 오프피크 시간대는 절반($0.15/$0.60)."
+    },
+    "google/gemini-3.8-flash": {
+      "note": "2027-01-01부터 공식 API 단가 인상 예정."
+    },
+    "google/gemini-4-argon": {
+      "note": "2026-12-01부터 공식 API 단가 인상 예정."
+    }
+  }
+}

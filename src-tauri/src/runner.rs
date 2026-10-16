@@ -119,6 +119,33 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
             }
         }
 
+        if let Ok(workers::Plan::Ai(job)) = workers::plan(&ctx, step.key) {
+            if !workers::handoff_for(&ctx, &job.actor) {
+                let decision = {
+                    let conn = state.db.lock().unwrap();
+                    let est = crate::usage::estimate(&conn, &ctx.settings, &job.actor, &ctx.input).ok();
+                    let (est_tok, est_krw) = est
+                        .map(|e| (e.est_total, e.est_krw))
+                        .unwrap_or_else(|| {
+                            let inp = crate::usage::estimate_prompt_tokens(job.engine, &job.prompt);
+                            (inp + 3000, 0)
+                        });
+                    crate::usage::check_budget_before_step(&conn, &ctx.settings, job.engine, est_tok, est_krw)?
+                };
+                match decision {
+                    crate::usage::BudgetDecision::Pause(msg) => {
+                        pause(app, task_id, &msg)?;
+                        return Ok(());
+                    }
+                    crate::usage::BudgetDecision::Warn(msg) => {
+                        let conn = state.db.lock().unwrap();
+                        let _ = db::add_event(&conn, task_id, "warn", &msg);
+                    }
+                    crate::usage::BudgetDecision::Ok => {}
+                }
+            }
+        }
+
         {
             let conn = state.db.lock().unwrap();
             db::step_started(&conn, task_id, step.key)?;

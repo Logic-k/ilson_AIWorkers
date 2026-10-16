@@ -11,9 +11,14 @@ pub fn now() -> String {
 pub fn open(dir: &Path) -> Result<Connection> {
     std::fs::create_dir_all(dir).context("데이터 폴더를 만들 수 없습니다")?;
     let conn = Connection::open(dir.join("ilson.db"))?;
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA foreign_keys=ON;
+        "PRAGMA foreign_keys=ON;
          CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
             employee_id TEXT NOT NULL,
@@ -61,11 +66,37 @@ pub fn open(dir: &Path) -> Result<Connection> {
             employee_id TEXT PRIMARY KEY,
             error TEXT NOT NULL,
             at TEXT NOT NULL
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            step_key TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            model TEXT,
+            model_source TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            reported_cost_usd REAL,
+            est_cost_usd REAL NOT NULL DEFAULT 0,
+            price_version TEXT,
+            usd_krw REAL,
+            prompt_chars INTEGER,
+            est_input_tokens INTEGER,
+            duration_ms INTEGER,
+            mode TEXT NOT NULL,
+            at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS usage_log_at ON usage_log(at);
+         CREATE INDEX IF NOT EXISTS usage_log_engine ON usage_log(engine, at);",
     )?;
-    // 0.2: 단계를 실제로 하는 직원(사무실 화면용)
+    // 0.2: 단계를 실제로 하는 직원(사무실 화면용) + 결과 열람 시각(inbox 미열람 배지용)
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN current_actor TEXT", []);
-    Ok(conn)
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN seen_at TEXT", []);
+    Ok(())
 }
 
 /// 같은 직원의 업무가 같은 이유로 두 번 연달아 실패하면, 원인을 고칠 때까지 새 업무를 막는다.
@@ -144,6 +175,7 @@ fn task_from_row(r: &Row) -> rusqlite::Result<Task> {
         error: r.get("error")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
+        seen_at: r.get("seen_at").unwrap_or(None),
         steps: vec![],
         events: vec![],
     })
@@ -207,6 +239,14 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Task> {
     Ok(task)
 }
 
+pub fn mark_task_seen(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET seen_at=?2 WHERE id=?1 AND seen_at IS NULL AND status=?3",
+        params![id, now(), status::COMPLETED],
+    )?;
+    Ok(())
+}
+
 pub fn delete_task(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM tasks WHERE id=?1", params![id])?;
     Ok(())
@@ -266,7 +306,7 @@ pub fn add_cost(conn: &Connection, id: &str, usd: f64) -> Result<()> {
 
 pub fn finish(conn: &Connection, id: &str, result: &Value) -> Result<()> {
     conn.execute(
-        "UPDATE tasks SET status=?2, result_json=?3, progress=100, current_step=NULL, current_actor=NULL, error=NULL, updated_at=?4 WHERE id=?1",
+        "UPDATE tasks SET status=?2, result_json=?3, progress=100, current_step=NULL, current_actor=NULL, error=NULL, seen_at=NULL, updated_at=?4 WHERE id=?1",
         params![id, status::COMPLETED, result.to_string(), now()],
     )?;
     Ok(())

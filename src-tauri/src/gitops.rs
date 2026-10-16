@@ -11,7 +11,7 @@ use std::os::windows::process::CommandExt;
 
 const IDENTITY: [&str; 4] = ["-c", "user.name=일손", "-c", "user.email=ilson@localhost"];
 /// 회사 관리용 파일: 커밋·변경 목록에서 뺀다.
-const MANAGED: [&str; 5] = ["--", ".", ":(exclude).ilson", ":(exclude).agents/agents/ilson-*", ":(exclude).claude/agents/ilson-*"];
+const MANAGED: [&str; 6] = ["--", ".", ":(exclude).ilson", ":(exclude).agents/agents/ilson-*", ":(exclude).claude/agents/ilson-*", ":(exclude).opencode/agents/ilson-*"];
 /// 화면에 보여 줄 diff 최대 크기.
 const MAX_DIFF: usize = 200_000;
 

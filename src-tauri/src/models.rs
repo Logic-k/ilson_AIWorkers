@@ -82,9 +82,27 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
+    pub seen_at: Option<String>,
+    #[serde(default)]
     pub steps: Vec<StepRow>,
     #[serde(default)]
     pub events: Vec<EventRow>,
+}
+
+/// 일일 토큰/원화 예산 상한 (전체 또는 엔진별).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BudgetCap {
+    pub daily_tokens: Option<u64>,
+    pub daily_krw: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Budgets {
+    pub daily_tokens: Option<u64>,
+    pub daily_krw: Option<i64>,
+    pub per_engine: HashMap<String, BudgetCap>,
 }
 
 /// 앱 설정. 사업장 정보와 문체는 블로그·견적·숏폼 직원이 함께 쓴다.
@@ -97,7 +115,7 @@ pub struct Settings {
     pub engine_mode: String,
     /// (이전 버전) Antigravity 자동 모드 동의 시각
     pub auto_ack_at: Option<String>,
-    /// 엔진별 자동 실행 위험 안내 동의 시각 (agy, claude, codex)
+    /// 엔진별 자동 실행 위험 안내 동의 시각 (agy, claude, codex, opencode)
     pub auto_acks: HashMap<String, String>,
     /// 직원별 담당 구독 엔진 (예: taeo → claude)
     pub assignments: HashMap<String, String>,
@@ -105,6 +123,14 @@ pub struct Settings {
     pub models: HashMap<String, String>,
     /// 자동 모드에서 파일을 고치는 단계를 모두 YOLO(확인 생략)로 실행
     pub yolo: bool,
+    /// 환산 비용 계산용 USD/KRW 환율 (기본 1343.0)
+    pub usd_krw: f64,
+    /// 마지막 환율 갱신 시각
+    pub fx_updated_at: Option<String>,
+    /// 엔진별 구독 요금제 (agy: pro|ultra5|ultra20, claude: pro|max5|max20, codex: plus|pro, opencode: free|go|go_plus)
+    pub plans: HashMap<String, String>,
+    /// 일일 토큰·원화 예산 상한
+    pub budgets: Budgets,
     pub business_name: String,
     pub owner_name: String,
     pub biz_reg_no: String,
@@ -139,7 +165,22 @@ impl Settings {
 
     pub fn model_for(&self, kind: Kind) -> Option<String> {
         let m = self.models.get(kind.id()).cloned().unwrap_or_else(|| if kind == Kind::Agy { self.model.clone() } else { String::new() });
-        (!m.trim().is_empty()).then(|| m.trim().to_string())
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            Some(trimmed.to_string())
+        } else if kind == Kind::Opencode {
+            Some(crate::engine::OPENCODE_DEFAULT_MODEL.to_string())
+        } else {
+            None
+        }
+    }
+
+    pub fn effective_usd_krw(&self) -> f64 {
+        if self.usd_krw > 100.0 {
+            self.usd_krw
+        } else {
+            1343.0
+        }
     }
 }
 
@@ -153,6 +194,10 @@ impl Default for Settings {
             assignments: HashMap::new(),
             models: HashMap::new(),
             yolo: false,
+            usd_krw: 1343.0,
+            fx_updated_at: None,
+            plans: HashMap::new(),
+            budgets: Budgets::default(),
             business_name: String::new(),
             owner_name: String::new(),
             biz_reg_no: String::new(),
