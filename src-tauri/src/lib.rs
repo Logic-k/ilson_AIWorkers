@@ -1,0 +1,85 @@
+mod commands;
+mod db;
+mod engine;
+mod gitops;
+mod models;
+mod roster;
+mod runner;
+mod web;
+mod workers;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
+
+pub struct AppState {
+    pub db: Mutex<rusqlite::Connection>,
+    pub http: reqwest::Client,
+    /// 실행 중인 업무와 '멈추기' 플래그.
+    pub running: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// 마지막으로 확인한 구독 엔진 상태 (엔진 ID → 상태).
+    pub engines: Mutex<HashMap<String, engine::EngineStatus>>,
+    /// 직원별 지금 하는 일 (사무실 화면).
+    pub activities: Mutex<HashMap<String, serde_json::Value>>,
+    /// 자동 모드: 한 번에 한 업무만 agy를 실행한다.
+    pub engine_lock: tokio::sync::Mutex<()>,
+    /// 안전 모드: 사장님이 ‘완료 처리’를 누른 업무.
+    pub external_done: Mutex<HashSet<String>>,
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let dir = app.path().app_data_dir()?;
+            let conn = db::open(&dir)?;
+            db::recover_interrupted(&conn)?;
+            app.manage(AppState {
+                db: Mutex::new(conn),
+                http: reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?,
+                running: Mutex::new(HashMap::new()),
+                engines: Mutex::new(HashMap::new()),
+                activities: Mutex::new(HashMap::new()),
+                engine_lock: tokio::sync::Mutex::new(()),
+                external_done: Mutex::new(HashSet::new()),
+            });
+            // 시작할 때 구독 엔진들의 설치·로그인 상태를 한 번 확인해 둔다 (사용량을 쓰지 않는다).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let all = commands::check_engines().await;
+                *handle.state::<AppState>().engines.lock().unwrap() = all;
+                let _ = handle.emit("engine-updated", ());
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::bootstrap,
+            commands::list_tasks,
+            commands::get_task,
+            commands::create_task,
+            commands::approve_task,
+            commands::decline_task,
+            commands::pause_task,
+            commands::resume_task,
+            commands::delete_task,
+            commands::undo_organize,
+            commands::get_recent_input,
+            commands::save_settings,
+            commands::engine_status,
+            commands::open_login_terminal,
+            commands::activities,
+            commands::task_diff,
+            commands::discard_task,
+            commands::task_workspace_path,
+            commands::open_in_antigravity,
+            commands::open_terminal,
+            commands::finish_external,
+            commands::acknowledge_guard,
+            commands::save_text_file,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

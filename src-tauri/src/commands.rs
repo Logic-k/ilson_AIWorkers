@@ -1,0 +1,375 @@
+use crate::models::{status, Settings, Task};
+use crate::{db, engine, gitops, roster, runner, workers, AppState};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use tauri::{AppHandle, Manager, State};
+
+type CmdResult<T> = Result<T, String>;
+
+fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// 직원별 지금 상태: ready(바로 사용) / setup_required(설정 필요) / busy(업무 중) / guarded(점검 필요)
+type Engines = HashMap<String, engine::EngineStatus>;
+
+fn availability(conn: &rusqlite::Connection, employee: &Value, settings: &Settings, engines: &Engines, tasks: &[Task]) -> Value {
+    let id = employee["id"].as_str().unwrap_or("");
+    let kind = settings.engine_for(id);
+    // 아직 확인하지 않았으면 막지 않는다 (실행할 때 다시 확인된다).
+    let engine_ready = engines.get(kind.id()).is_none_or(|e| e.signed_in);
+    let engine_need = format!("{} 로그인", kind.label());
+    let mut missing: Vec<String> = vec![];
+    for req in roster::requirements(id) {
+        match *req {
+            "agy" if !engine_ready => missing.push(engine_need.clone()),
+            "business" if settings.business_name.trim().is_empty() => missing.push("사업장 상호".into()),
+            _ => {}
+        }
+    }
+    if let Ok(Some(error)) = db::guard(conn, id) {
+        return json!({ "status": "guarded", "missing": missing, "guard": error });
+    }
+    if !missing.is_empty() {
+        return json!({ "status": "setup_required", "missing": missing });
+    }
+    let busy = tasks.iter().any(|t| t.employee_id == id && t.status == status::RUNNING);
+    json!({ "status": if busy { "busy" } else { "ready" }, "missing": [] })
+}
+
+#[tauri::command]
+pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value> {
+    let conn = state.db.lock().unwrap();
+    let settings = db::load_settings(&conn).map_err(err)?;
+    let tasks = db::list_tasks(&conn).map_err(err)?;
+    let engines = state.engines.lock().unwrap().clone();
+    let safe = !settings.auto_mode();
+    let employees: Vec<Value> = roster::all(safe)
+        .into_iter()
+        .map(|mut e| {
+            let id = e["id"].as_str().unwrap_or("").to_string();
+            e["availability"] = availability(&conn, &e, &settings, &engines, &tasks);
+            if roster::requirements(&id).contains(&"agy") {
+                let kind = settings.engine_for(&id);
+                e["engine"] = json!({ "id": kind.id(), "label": kind.label(), "auto": settings.auto_ok(kind) && settings.engine_mode == "auto" });
+            }
+            e
+        })
+        .collect();
+    let data_dir = app.path().app_data_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(json!({
+        "employees": employees,
+        "settings": settings,
+        "engines": engine::ALL.iter().map(|k| engines.get(k.id()).cloned().map(|s| json!(s)).unwrap_or_else(|| json!({ "id": k.id(), "label": k.label(), "plan": k.plan(), "canAuto": k.can_auto(), "installed": false, "signedIn": false, "models": [], "message": "확인 중" }))).collect::<Vec<_>>(),
+        "levels": engine::ALL.iter().map(|k| json!({
+            "engine": k.id(),
+            "readOnly": engine::level_args(*k, engine::Level::ReadOnly).join(" "),
+            "edit": engine::level_args(*k, engine::Level::Edit).join(" "),
+            "sandbox": engine::level_args(*k, engine::Level::Sandbox).join(" "),
+            "yolo": engine::level_args(*k, engine::Level::Yolo).join(" "),
+        })).collect::<Vec<_>>(),
+        "dataDir": data_dir,
+        "version": app.package_info().version.to_string(),
+    }))
+}
+
+#[tauri::command]
+pub fn list_tasks(state: State<'_, AppState>) -> CmdResult<Vec<Task>> {
+    let conn = state.db.lock().unwrap();
+    db::list_tasks(&conn).map_err(err)
+}
+
+#[tauri::command]
+pub fn get_task(state: State<'_, AppState>, id: String) -> CmdResult<Task> {
+    let conn = state.db.lock().unwrap();
+    db::get_task(&conn, &id).map_err(err)
+}
+
+#[tauri::command]
+pub fn create_task(app: AppHandle, state: State<'_, AppState>, employee_id: String, title: String, input: Value) -> CmdResult<Task> {
+    let employee = roster::find(&employee_id).ok_or("알 수 없는 직원입니다.")?;
+    let problems = roster::validate(&employee, &input);
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+    let task = {
+        let conn = state.db.lock().unwrap();
+        let settings = db::load_settings(&conn).map_err(err)?;
+        let tasks = db::list_tasks(&conn).map_err(err)?;
+        let engines = state.engines.lock().unwrap().clone();
+        let avail = availability(&conn, &employee, &settings, &engines, &tasks);
+        match avail["status"].as_str() {
+            Some("guarded") => {
+                return Err(format!(
+                    "같은 문제로 업무가 두 번 실패해 잠시 멈춰 두었습니다. 원인을 확인한 뒤 ‘조치했어요’를 눌러 주세요.\n최근 오류: {}",
+                    avail["guard"].as_str().unwrap_or("")
+                ))
+            }
+            Some("setup_required") => {
+                let missing: Vec<&str> = avail["missing"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                return Err(format!("먼저 준비해 주세요: {}. 연결 및 설정에서 입력할 수 있습니다.", missing.join(", ")));
+            }
+            _ => {}
+        }
+        let title = if title.trim().is_empty() { roster::default_title(&employee, &input) } else { title.trim().to_string() };
+        let now = db::now();
+        let task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            employee_id: employee_id.clone(),
+            title,
+            status: status::QUEUED.into(),
+            input: {
+                let mut i = input.clone();
+                i["_engine"] = json!(if settings.auto_mode() { "auto" } else { "safe" });
+                i
+            },
+            progress: 0,
+            current_step: None,
+            current_actor: None,
+            pending_gate: None,
+            approved_gates: vec![],
+            cost_usd: 0.0,
+            result: None,
+            error: None,
+            created_at: now.clone(),
+            updated_at: now,
+            steps: vec![],
+            events: vec![],
+        };
+        let safe = !settings.auto_mode();
+        let steps: Vec<(String, String)> = roster::steps(&employee_id, safe)
+            .iter()
+            .map(|s| (s.key.to_string(), s.label.to_string()))
+            .collect();
+        db::insert_task(&conn, &task, &steps).map_err(err)?;
+        db::add_event(&conn, &task.id, "info", &format!("{}에게 업무를 맡겼습니다.", employee["name"].as_str().unwrap_or(""))).map_err(err)?;
+        db::save_recent_input(&conn, &employee_id, &input).map_err(err)?;
+        task
+    };
+    runner::emit(&app, &task.id);
+    runner::spawn(app, task.id.clone());
+    Ok(task)
+}
+
+#[tauri::command]
+pub fn approve_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    {
+        let conn = state.db.lock().unwrap();
+        let task = db::get_task(&conn, &id).map_err(err)?;
+        let gate = task.pending_gate.filter(|_| task.status == status::AWAITING_APPROVAL).ok_or("확인을 기다리는 업무가 아닙니다.")?;
+        let key = if gate.key.is_empty() { gate.kind.clone() } else { gate.key.clone() };
+        db::approve_gate(&conn, &id, &key).map_err(err)?;
+        db::set_status(&conn, &id, status::QUEUED).map_err(err)?;
+        db::add_event(&conn, &id, "info", &format!("사장님이 확인했습니다. ({})", gate.summary)).map_err(err)?;
+    }
+    runner::spawn(app, id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn decline_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let conn = state.db.lock().unwrap();
+    let task = db::get_task(&conn, &id).map_err(err)?;
+    if task.status != status::AWAITING_APPROVAL {
+        return Err("확인을 기다리는 업무가 아닙니다.".into());
+    }
+    db::set_gate(&conn, &id, None).map_err(err)?;
+    db::set_status(&conn, &id, status::CANCELLED).map_err(err)?;
+    db::add_event(&conn, &id, "warn", "사장님이 이번 단계를 진행하지 않기로 했습니다. 코딩 업무라면 작업 브랜치는 남아 있어 직접 살펴보거나 ‘작업 공간 지우기’로 정리할 수 있습니다.").map_err(err)?;
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if let Some(flag) = state.running.lock().unwrap().get(&id) {
+        flag.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+    let conn = state.db.lock().unwrap();
+    let task = db::get_task(&conn, &id).map_err(err)?;
+    if task.status == status::QUEUED || task.status == status::AWAITING_APPROVAL {
+        db::set_gate(&conn, &id, None).map_err(err)?;
+        db::set_status(&conn, &id, status::PAUSED).map_err(err)?;
+        db::add_event(&conn, &id, "warn", "사장님 요청으로 멈췄습니다.").map_err(err)?;
+    }
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    {
+        let conn = state.db.lock().unwrap();
+        let task = db::get_task(&conn, &id).map_err(err)?;
+        if ![status::PAUSED, status::FAILED, status::CANCELLED].contains(&task.status.as_str()) {
+            return Err("멈춘 업무만 이어서 할 수 있습니다.".into());
+        }
+        // 끝난 단계의 확인만 남긴다. 다시 할 유료 단계는 비용을 새로 확인받는다.
+        let done: Vec<String> = task.steps.iter().filter(|s| s.status == "done").map(|s| s.key.clone()).collect();
+        let keep: Vec<String> = task
+            .approved_gates
+            .iter()
+            .filter(|g| g.split_once(':').is_some_and(|(_, step)| done.iter().any(|d| d == step)))
+            .cloned()
+            .collect();
+        db::reset_pending_gates(&conn, &id, &keep).map_err(err)?;
+        db::set_status(&conn, &id, status::QUEUED).map_err(err)?;
+        db::add_event(&conn, &id, "info", "이어하기를 요청했습니다.").map_err(err)?;
+    }
+    runner::spawn(app, id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if state.running.lock().unwrap().contains_key(&id) {
+        return Err("진행 중인 업무는 먼저 멈춰 주세요.".into());
+    }
+    let conn = state.db.lock().unwrap();
+    db::delete_task(&conn, &id).map_err(err)?;
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn undo_organize(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    let conn = state.db.lock().unwrap();
+    let task = db::get_task(&conn, &id).map_err(err)?;
+    let mut result = task.result.filter(|r| r["kind"] == "organize").ok_or("되돌릴 정리 기록이 없습니다.")?;
+    let (back, skipped) = workers::undo_organize(&mut result).map_err(err)?;
+    db::set_result(&conn, &id, &result).map_err(err)?;
+    let msg = if skipped == 0 {
+        format!("파일 {back}개를 원래 자리로 되돌렸습니다.")
+    } else {
+        format!("파일 {back}개를 되돌리고, 그사이 바뀐 {skipped}개는 그대로 두었습니다.")
+    };
+    db::add_event(&conn, &id, "info", &msg).map_err(err)?;
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(msg)
+}
+
+#[tauri::command]
+pub fn get_recent_input(state: State<'_, AppState>, employee_id: String) -> CmdResult<Option<Value>> {
+    let conn = state.db.lock().unwrap();
+    db::recent_input(&conn, &employee_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<()> {
+    let conn = state.db.lock().unwrap();
+    db::save_settings(&conn, &settings).map_err(err)
+}
+
+/// 모든 구독 엔진의 설치·로그인 상태를 함께 확인한다 (사용량을 쓰지 않는다).
+pub async fn check_engines() -> Engines {
+    let (a, b, c, d) = tokio::join!(
+        engine::status(engine::Kind::Agy),
+        engine::status(engine::Kind::Claude),
+        engine::status(engine::Kind::Codex),
+        engine::status(engine::Kind::Kiro)
+    );
+    [a, b, c, d].into_iter().map(|s| (s.id.clone(), s)).collect()
+}
+
+#[tauri::command]
+pub async fn engine_status(app: AppHandle) -> CmdResult<Vec<engine::EngineStatus>> {
+    let all = check_engines().await;
+    *app.state::<AppState>().engines.lock().unwrap() = all.clone();
+    Ok(engine::ALL.iter().filter_map(|k| all.get(k.id()).cloned()).collect())
+}
+
+#[tauri::command]
+pub fn open_login_terminal(engine: String) -> CmdResult<()> {
+    engine::open_login_terminal(engine::Kind::from_id(&engine)).map_err(err)
+}
+
+/// 안전 모드: 작업 폴더에서 새 터미널을 연다.
+#[tauri::command]
+pub fn open_terminal(folder: String) -> CmdResult<()> {
+    engine::open_terminal(&folder).map_err(err)
+}
+
+/// 지금 직원들이 하고 있는 일 (사무실 화면 첫 그림용).
+#[tauri::command]
+pub fn activities(state: State<'_, AppState>) -> Vec<Value> {
+    state.activities.lock().unwrap().values().cloned().collect()
+}
+
+fn task_workspace(conn: &rusqlite::Connection, id: &str) -> Result<gitops::Workspace, String> {
+    let setup = db::step_outputs(conn, id)
+        .map_err(err)?
+        .into_iter()
+        .find(|(k, _, _)| k == "setup")
+        .and_then(|(_, _, out)| out)
+        .ok_or("작업 공간이 없는 업무입니다.")?;
+    serde_json::from_value(setup["workspace"].clone()).map_err(|_| "작업 공간 정보를 읽지 못했습니다.".to_string())
+}
+
+/// 병합 전 변경 내용(diff).
+#[tauri::command]
+pub fn task_diff(state: State<'_, AppState>, id: String) -> CmdResult<gitops::DiffSummary> {
+    let conn = state.db.lock().unwrap();
+    let ws = task_workspace(&conn, &id)?;
+    drop(conn);
+    if !std::path::Path::new(&ws.path).exists() {
+        return Err("작업 공간이 이미 정리되었습니다.".into());
+    }
+    gitops::diff(&ws).map_err(err)
+}
+
+/// 병합하지 않은 작업 공간과 작업 브랜치를 지운다.
+#[tauri::command]
+pub fn discard_task(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if state.running.lock().unwrap().contains_key(&id) {
+        return Err("진행 중인 업무는 먼저 멈춰 주세요.".into());
+    }
+    let conn = state.db.lock().unwrap();
+    let ws = task_workspace(&conn, &id)?;
+    gitops::cleanup(&ws, true);
+    db::set_gate(&conn, &id, None).map_err(err)?;
+    db::set_status(&conn, &id, status::CANCELLED).map_err(err)?;
+    db::add_event(&conn, &id, "warn", &format!("작업 공간과 브랜치 {}를 지웠습니다. 원래 저장소는 바뀌지 않았습니다.", ws.branch)).map_err(err)?;
+    drop(conn);
+    runner::emit(&app, &id);
+    Ok(())
+}
+
+/// 안전 모드: Antigravity IDE를 작업 폴더로 연다. (앱은 agy를 실행하지 않는다)
+#[tauri::command]
+pub fn open_in_antigravity(folder: String) -> CmdResult<()> {
+    engine::open_ide(&folder).map_err(err)
+}
+
+/// 안전 모드: 보고서 파일이 없어도 이 단계를 끝난 것으로 처리한다.
+#[tauri::command]
+pub fn finish_external(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if !state.running.lock().unwrap().contains_key(&id) {
+        return Err("지켜보는 중인 업무가 아닙니다.".into());
+    }
+    state.external_done.lock().unwrap().insert(id);
+    Ok(())
+}
+
+/// 작업 공간 폴더 경로 (탐색기·IDE로 열기용).
+#[tauri::command]
+pub fn task_workspace_path(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    let conn = state.db.lock().unwrap();
+    Ok(task_workspace(&conn, &id)?.path)
+}
+
+#[tauri::command]
+pub fn acknowledge_guard(state: State<'_, AppState>, employee_id: String) -> CmdResult<()> {
+    let conn = state.db.lock().unwrap();
+    db::clear_guard(&conn, &employee_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn save_text_file(path: String, contents: String) -> CmdResult<()> {
+    std::fs::write(&path, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))
+}
