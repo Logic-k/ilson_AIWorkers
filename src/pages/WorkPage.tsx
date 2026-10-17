@@ -97,8 +97,26 @@ function TaskDetail({ id }: { id: string }) {
         api.markTaskSeen(id).catch(() => undefined);
       }
     }).catch(() => alive && setTask(null));
-    api.usageForTask(id).then((u) => alive && setUsages(u)).catch(() => alive && setUsages([]));
-    api.taskStepOutputs(id).then((outs) => alive && setStepOutputs(outs)).catch(() => alive && setStepOutputs([]));
+    api.usageForTask(id).then((u) => alive && setUsages(Array.isArray(u) ? u : [])).catch(() => alive && setUsages([]));
+    api.taskStepOutputs(id)
+      .then((outs) => {
+        if (!alive) return;
+        if (Array.isArray(outs)) {
+          setStepOutputs(outs);
+        } else if (outs && typeof outs === "object") {
+          const converted: StepOutput[] = Object.entries(outs as Record<string, Record<string, unknown>>)
+            .map(([k, v]) => ({
+              key: k,
+              title: `${k} 단계 산출물`,
+              markdown: typeof v?.markdown === "string" ? v.markdown : "",
+            }))
+            .filter((x) => x.markdown.trim().length > 0);
+          setStepOutputs(converted);
+        } else {
+          setStepOutputs([]);
+        }
+      })
+      .catch(() => alive && setStepOutputs([]));
     return () => {
       alive = false;
     };
@@ -106,10 +124,14 @@ function TaskDetail({ id }: { id: string }) {
 
   if (!task) return <Empty title="업무를 불러오는 중입니다" />;
   const e = employee(task.employeeId);
-  const totalTokens = usages.reduce((sum, u) => sum + u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens, 0);
-  const totalKrw = usages.reduce((sum, u) => sum + u.estKrw, 0);
-  const totalUsd = usages.reduce((sum, u) => sum + (u.reportedCostUsd ?? u.estCostUsd ?? 0), 0);
-  const lastUsage = usages[usages.length - 1];
+  const safeUsages = Array.isArray(usages) ? usages : [];
+  const safeSteps = Array.isArray(task.steps) ? task.steps : [];
+  const safeEvents = Array.isArray(task.events) ? task.events : [];
+  const safeStepOutputs = Array.isArray(stepOutputs) ? stepOutputs : [];
+  const totalTokens = safeUsages.reduce((sum, u) => sum + u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens, 0);
+  const totalKrw = safeUsages.reduce((sum, u) => sum + u.estKrw, 0);
+  const totalUsd = safeUsages.reduce((sum, u) => sum + (u.reportedCostUsd ?? u.estCostUsd ?? 0), 0);
+  const lastUsage = safeUsages[safeUsages.length - 1];
 
   const act = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -123,8 +145,9 @@ function TaskDetail({ id }: { id: string }) {
       setBusy(false);
     }
   };
+  const inputObj = task.input && typeof task.input === "object" ? task.input : {};
   const gate = task.pendingGate;
-  const safe = task.input._engine !== "auto";
+  const safe = inputObj._engine !== "auto";
   const stepDef = e?.steps.find((s) => s.label === task.currentStep);
   const watching = safe && task.status === "running" && stepDef?.gate === "handoff";
   const liveByActor = task.currentActor ? activities[task.currentActor] : undefined;
@@ -136,15 +159,15 @@ function TaskDetail({ id }: { id: string }) {
   const outputFolder =
     (task.result?.kind === "code" ? task.result.workspace?.repo : undefined) ||
     (task.result?.kind === "organize" ? task.result.folder : undefined) ||
-    (typeof task.input.folder === "string" && task.input.folder.trim() ? task.input.folder.trim() : undefined);
+    (typeof inputObj.folder === "string" && inputObj.folder.trim() ? inputObj.folder.trim() : undefined);
 
   const entryHtml = task.result?.kind === "code" ? task.result.entryHtml : undefined;
-  const followupRound = Number(task.input._followupRound ?? 1);
-  const followupHistory = Array.isArray(task.input._followupHistory)
-    ? (task.input._followupHistory as { round?: number; prompt?: string; at?: string }[])
+  const followupRound = Number(inputObj._followupRound ?? (Number(inputObj._followupCount ?? 0) + 1));
+  const followupHistory = Array.isArray(inputObj._followupHistory)
+    ? (inputObj._followupHistory as { round?: number; prompt?: string; at?: string }[])
     : [];
 
-  const selectedStepOutput = stepOutputs.find((o) => o.key === selectedStepKey);
+  const selectedStepOutput = safeStepOutputs.find((o) => o.key === selectedStepKey);
 
   const copy = async (text: string, msg: string) => {
     await navigator.clipboard.writeText(text);
@@ -239,10 +262,10 @@ function TaskDetail({ id }: { id: string }) {
 
         {/* SOP 릴레이 파이프라인 바 */}
         <div className="sop-relay">
-          {task.steps.map((s, idx) => {
+          {safeSteps.map((s, idx) => {
             const actorId = e?.steps.find((es) => es.key === s.key)?.actor ?? STEP_ACTOR_FALLBACK[s.key] ?? task.employeeId;
             const stepEmp = employee(actorId);
-            const hasOutput = stepOutputs.some((o) => o.key === s.key);
+            const hasOutput = safeStepOutputs.some((o) => o.key === s.key);
             const isSelected = selectedStepKey === s.key;
             return (
               <button
@@ -296,7 +319,7 @@ function TaskDetail({ id }: { id: string }) {
         )}
 
         {/* 실시간 에이전트 터미널 & 팀 인계 피드 (진행 중이거나 최근 활동이 있을 때 표시) */}
-        {(task.status === "running" || task.status === "queued" || task.events.length > 0) && (
+        {(task.status === "running" || task.status === "queued" || safeEvents.length > 0) && (
           <div className="live-studio__grid">
             <div className="live-terminal">
               <div className="live-terminal__bar">
@@ -330,7 +353,7 @@ function TaskDetail({ id }: { id: string }) {
                   ? live.detail
                   : task.status === "running"
                     ? `> OpenCode 에이전트(${activeActorEmp?.name ?? ""})가 '${task.currentStep ?? "현재 단계"}' 작업을 수행하고 있습니다...\n> 파일 작성·수정 또는 추론 결과가 나오는 즉시 이 화면에 실시간 스트리밍됩니다.`
-                    : task.steps
+                    : safeSteps
                         .filter((s) => s.note)
                         .map((s) => `[${s.label}] ${s.note}`)
                         .join("\n") || "작업 완료 후 아래 결과물 탭에서 전체 산출물을 확인하거나, 추가 업무 지시를 내릴 수 있습니다."}
@@ -340,15 +363,16 @@ function TaskDetail({ id }: { id: string }) {
             <div className="live-handoffs">
               <div className="live-handoffs__head">
                 <strong>💬 팀 협업 인계 & 실시간 작업 로그</strong>
-                <small>최근 {Math.min(task.events.length, 8)}건</small>
+                <small>최근 {Math.min(safeEvents.length, 8)}건</small>
               </div>
               <ul className="live-handoffs__list">
-                {task.events.slice(-8).reverse().map((ev, i) => {
-                  const isHandoff = ev.message.includes("[업무 인계]") || ev.message.includes("[추가 업무 지시");
+                {safeEvents.slice(-8).reverse().map((ev, i) => {
+                  const msg = typeof ev.message === "string" ? ev.message : "";
+                  const isHandoff = msg.includes("[업무 인계]") || msg.includes("[추가 업무 지시");
                   return (
                     <li key={i} className={`live-handoffs__item ${isHandoff ? "is-handoff" : `is-${ev.level}`}`}>
                       <time>{new Date(ev.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
-                      <span>{ev.message}</span>
+                      <span>{msg}</span>
                     </li>
                   );
                 })}

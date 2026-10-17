@@ -538,18 +538,42 @@ pub async fn refresh_fx(state: State<'_, AppState>) -> CmdResult<Settings> {
 
 /// 진행 중이거나 완료된 업무의 단계별 산출물(리서치·기획서·개발보고 등)을 가져온다.
 #[tauri::command]
-pub fn task_step_outputs(state: State<'_, AppState>, id: String) -> CmdResult<HashMap<String, Value>> {
+pub fn task_step_outputs(state: State<'_, AppState>, id: String) -> CmdResult<Vec<Value>> {
     let conn = state.db.lock().unwrap();
     let rows = db::step_outputs(&conn, &id).map_err(err)?;
-    let mut map = HashMap::new();
-    for (k, st, out) in rows {
-        if st == "done" {
-            if let Some(v) = out {
-                map.insert(k, v);
+    let mut list = Vec::new();
+    for (k, _st, out) in rows {
+        if let Some(v) = out {
+            let md = v["markdown"]
+                .as_str()
+                .or_else(|| v["text"].as_str())
+                .or_else(|| v["summary"].as_str())
+                .unwrap_or("")
+                .trim();
+            if !md.is_empty() {
+                let title = match k.as_str() {
+                    "research" => "1단계 · 시장 및 도메인 리서치 브리프 (서진)",
+                    "plan" => "2단계 · 요구사항 정의서(PRD) 및 아키텍처 설계 (태오)",
+                    "backend" => "3단계 · 핵심 로직 및 데이터 구조 구현 보고 (건우)",
+                    "frontend" => "4단계 · 화면(UI/UX) 및 인터랙션 구현 보고 (유나)",
+                    "test" => "5단계 · QA 테스트 및 결함 검증 보고 (소희)",
+                    "review" => "6단계 · 시니어 코드 리뷰 및 보안·품질 감사 (민혁)",
+                    "fix" => "보완 패치 내역",
+                    "docs" => "7단계 · 사용자 안내서(README) 및 문서화 (다은)",
+                    "outline" => "구성안 및 목차 설계",
+                    "draft" => "초안 작성 본문",
+                    "polish" => "다듬기 및 윤문 결과",
+                    _ => k.as_str(),
+                };
+                list.push(json!({
+                    "key": k,
+                    "title": title,
+                    "markdown": md,
+                }));
             }
         }
     }
-    Ok(map)
+    Ok(list)
 }
 
 /// 완료·중단된 업무 세션에서 바로 추가 업무 지시를 내려 같은 폴더·맥락에서 이어서 작업한다.
@@ -577,11 +601,12 @@ pub fn followup_task(app: AppHandle, state: State<'_, AppState>, id: String, pro
             .unwrap_or_else(|| task.title.clone());
         input["_baseTitle"] = json!(base_title);
         input["_followupCount"] = json!(next_count);
+        input["_followupRound"] = json!(next_count + 1);
         input["_followupLatest"] = json!(trimmed);
 
         let mut history = input["_followupHistory"].as_array().cloned().unwrap_or_default();
         history.push(json!({
-            "round": next_count,
+            "round": next_count + 1,
             "prompt": trimmed,
             "at": db::now(),
         }));
@@ -721,6 +746,7 @@ fn parse_skill_markdown(md: &str, url: &str) -> Value {
     };
 
     json!({
+        "name": if !name.is_empty() { name.chars().take(16).collect::<String>() } else { "새 직원".to_string() },
         "role": role,
         "summary": summary,
         "floor": if is_dev { "dev" } else { "office" },
