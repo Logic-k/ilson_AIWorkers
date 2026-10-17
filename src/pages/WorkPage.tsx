@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { api, errorText, isDev, relativeTime, type DiffSummary, type Task, type TaskStatus } from "../api";
+import {
+  api,
+  errorText,
+  fmtTokens,
+  fmtUsd,
+  isDev,
+  relativeTime,
+  shortModelLabel,
+  won,
+  type DiffSummary,
+  type Task,
+  type TaskStatus,
+  type UsageRow,
+} from "../api";
 import { useStore } from "../store";
-import { Avatar, Empty, Icon, StatusBadge } from "../components/ui";
+import { Avatar, Empty, Icon, StatusBadge, TokenChip } from "../components/ui";
 import { DeliverableView } from "../components/DeliverableView";
 
 const tabs: { id: string; label: string; match: TaskStatus[] }[] = [
@@ -51,12 +64,20 @@ function DiffViewer({ taskId }: { taskId: string }) {
 function TaskDetail({ id }: { id: string }) {
   const { employee, lastEvent, toast, refresh, newTask, navigate, activities } = useStore();
   const [task, setTask] = useState<Task | null>(null);
+  const [usages, setUsages] = useState<UsageRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
+  const [detailTab, setDetailTab] = useState<"deliverable" | "evidence" | "diff" | "tokens" | "timeline">("deliverable");
 
   useEffect(() => {
     let alive = true;
-    api.getTask(id).then((t) => alive && setTask(t)).catch(() => alive && setTask(null));
+    api.getTask(id).then((t) => {
+      if (alive) {
+        setTask(t);
+        api.markTaskSeen(id).catch(() => undefined);
+      }
+    }).catch(() => alive && setTask(null));
+    api.usageForTask(id).then((u) => alive && setUsages(u)).catch(() => alive && setUsages([]));
     return () => {
       alive = false;
     };
@@ -64,6 +85,11 @@ function TaskDetail({ id }: { id: string }) {
 
   if (!task) return <Empty title="업무를 불러오는 중입니다" />;
   const e = employee(task.employeeId);
+  const totalTokens = usages.reduce((sum, u) => sum + u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens, 0);
+  const totalKrw = usages.reduce((sum, u) => sum + u.estKrw, 0);
+  const totalUsd = usages.reduce((sum, u) => sum + (u.reportedCostUsd ?? u.estCostUsd ?? 0), 0);
+  const lastUsage = usages[usages.length - 1];
+
   const act = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true);
     try {
@@ -102,6 +128,22 @@ function TaskDetail({ id }: { id: string }) {
         <p>
           맡긴 때 {new Date(task.createdAt).toLocaleString("ko-KR")} · 마지막 변경 {relativeTime(task.updatedAt)}
         </p>
+        {usages.length > 0 && (
+          <dl className="task-header__tokens">
+            <dt>총 토큰:</dt>
+            <dd>{fmtTokens(totalTokens)}</dd>
+            <dt>환산 비용:</dt>
+            <dd>{won(totalKrw)} ({fmtUsd(totalUsd)})</dd>
+            {lastUsage && (
+              <>
+                <dt>엔진:</dt>
+                <dd>{lastUsage.engine}</dd>
+                <dt>모델:</dt>
+                <dd>{shortModelLabel(lastUsage.model)}</dd>
+              </>
+            )}
+          </dl>
+        )}
       </header>
 
       {["running", "queued", "awaiting_approval"].includes(task.status) && (
@@ -266,40 +308,192 @@ function TaskDetail({ id }: { id: string }) {
         )}
       </div>
 
-      {task.status === "completed" && task.result && (
+      <nav className="tabs" style={{ marginTop: 20 }}>
+        <button
+          className={`tab ${detailTab === "deliverable" ? "is-active" : ""}`}
+          onClick={() => setDetailTab("deliverable")}
+        >
+          결과물
+        </button>
+        <button
+          className={`tab ${detailTab === "evidence" ? "is-active" : ""}`}
+          onClick={() => setDetailTab("evidence")}
+        >
+          증빙
+        </button>
+        <button
+          className={`tab ${detailTab === "diff" ? "is-active" : ""}`}
+          onClick={() => setDetailTab("diff")}
+        >
+          변경 내용
+        </button>
+        <button
+          className={`tab ${detailTab === "tokens" ? "is-active" : ""}`}
+          onClick={() => setDetailTab("tokens")}
+        >
+          토큰 {usages.length > 0 && <span className="tab__badge">{fmtTokens(totalTokens)}</span>}
+        </button>
+        <button
+          className={`tab ${detailTab === "timeline" ? "is-active" : ""}`}
+          onClick={() => setDetailTab("timeline")}
+        >
+          기록 <span className="tab__badge">{task.events.length}</span>
+        </button>
+      </nav>
+
+      {detailTab === "deliverable" && (
         <section className="result">
-          <h3>결과물</h3>
-          <DeliverableView task={task} result={task.result} />
+          {task.result ? (
+            <DeliverableView task={task} result={task.result} />
+          ) : (
+            <Empty title="아직 완성된 결과물이 없습니다">
+              {task.status === "running" ? "직원이 업무를 진행하고 있습니다." : "업무를 진행하면 여기에 최종 결과물이 표시됩니다."}
+            </Empty>
+          )}
         </section>
       )}
 
-      <section className="timeline">
-        <h3>업무 진행</h3>
-        <ol>
-          {task.steps.map((s) => (
-            <li key={s.key} className={`timeline__step timeline__step--${s.status}`}>
-              <i />
-              <div>
-                <strong>{s.label}</strong>
-                {s.note && <p>{s.note}</p>}
-              </div>
-              <time>{s.finishedAt ? new Date(s.finishedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : ""}</time>
-            </li>
-          ))}
-        </ol>
-      </section>
+      {detailTab === "evidence" && (
+        <section className="card">
+          <h3>검증 및 증빙 자료</h3>
+          {task.result?.kind === "document" && task.result.checks && task.result.checks.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <h4>자동 점검 항목</h4>
+              <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
+                {task.result.checks.map((c, i) => (
+                  <li key={i} style={{ color: c.ok ? "var(--ok)" : "var(--warn)" }}>
+                    <strong>{c.label}</strong>: {c.value} ({c.ok ? "통과" : "주의"})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {task.result?.kind === "document" && task.result.sources && task.result.sources.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <h4>참고 자료 및 출처</h4>
+              <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
+                {task.result.sources.map((s, i) => (
+                  <li key={i}>
+                    <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {task.result?.kind === "code" && (
+            <div>
+              <h4>코드 검증 결과</h4>
+              <p>판정: <strong>{task.result.verdict || "정상 검증 완료"}</strong></p>
+              {task.result.mergeCommit && <p>커밋 해시: <code>{task.result.mergeCommit}</code></p>}
+            </div>
+          )}
+          {(!task.result || (task.result.kind !== "document" && task.result.kind !== "code")) && (
+            <Empty title="별도의 증빙 자료가 없습니다">
+              업무 실행 중 수집된 검증 데이터와 출처가 여기에 정리됩니다.
+            </Empty>
+          )}
+        </section>
+      )}
 
-      <details className="event-log">
-        <summary>업무 기록 {task.events.length}건</summary>
-        <ul>
-          {task.events.map((ev, i) => (
-            <li key={i} className={`event event--${ev.level}`}>
-              <time>{new Date(ev.at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
-              <span>{ev.message}</span>
-            </li>
-          ))}
-        </ul>
-      </details>
+      {detailTab === "diff" && (
+        <section className="card">
+          <h3>작업 공간 변경 내용</h3>
+          <DiffViewer taskId={task.id} />
+        </section>
+      )}
+
+      {detailTab === "tokens" && (
+        <section className="card">
+          <h3>단계별 토큰 및 환산 비용</h3>
+          {usages.length === 0 ? (
+            <Empty title="기록된 토큰 사용량이 없습니다">
+              자동 모드로 실행하거나 구독 CLI를 통해 작업이 진행되면 단계별 토큰이 기록됩니다.
+            </Empty>
+          ) : (
+            <div style={{ overflowX: "auto", marginTop: 12 }}>
+              <table className="usage-table">
+                <thead>
+                  <tr>
+                    <th>단계</th>
+                    <th>담당 직원</th>
+                    <th>엔진</th>
+                    <th>모델</th>
+                    <th className="num">입력 토큰</th>
+                    <th className="num">출력 토큰</th>
+                    <th className="num">환산 비용</th>
+                    <th>기록 시각</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usages.map((u) => (
+                    <tr key={u.id}>
+                      <td><strong>{u.stepKey}</strong></td>
+                      <td>{u.actor}</td>
+                      <td>{u.engine}</td>
+                      <td>
+                        {shortModelLabel(u.model)}
+                        {u.estCostUsd === 0 && <span className="model-chip model-chip--free" style={{ marginLeft: 4 }}>무료</span>}
+                      </td>
+                      <td className="num">{fmtTokens(u.inputTokens)}</td>
+                      <td className="num">{fmtTokens(u.outputTokens)}</td>
+                      <td className="num">{won(u.estKrw)}</td>
+                      <td style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                        {new Date(u.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {detailTab === "timeline" && (
+        <>
+          <section className="timeline">
+            <h3>업무 진행</h3>
+            <ol>
+              {task.steps.map((s) => {
+                const stepUsage = usages.find((u) => u.stepKey === s.key);
+                return (
+                  <li key={s.key} className={`timeline__step timeline__step--${s.status}`}>
+                    <i />
+                    <div>
+                      <strong>{s.label}</strong>
+                      {s.note && <p>{s.note}</p>}
+                      {stepUsage && (
+                        <div style={{ marginTop: 4 }}>
+                          <TokenChip
+                            model={stepUsage.model}
+                            input={stepUsage.inputTokens}
+                            output={stepUsage.outputTokens}
+                            krw={stepUsage.estKrw}
+                            free={stepUsage.estCostUsd === 0}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <time>{s.finishedAt ? new Date(s.finishedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : ""}</time>
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+
+          <details className="event-log">
+            <summary>업무 기록 {task.events.length}건</summary>
+            <ul>
+              {task.events.map((ev, i) => (
+                <li key={i} className={`event event--${ev.level}`}>
+                  <time>{new Date(ev.at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                  <span>{ev.message}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        </>
+      )}
     </article>
   );
 }
@@ -340,13 +534,21 @@ export function WorkPage() {
           <aside className="master">
             {filtered.map((t) => {
               const e = employee(t.employeeId);
+              const isUnread = (!t.seenAt || new Date(t.updatedAt).getTime() > new Date(t.seenAt).getTime()) && t.status !== "queued";
               return (
-                <button key={t.id} className={`work-item ${selected === t.id ? "is-on" : ""}`} onClick={() => navigate("work", t.id)}>
+                <button
+                  key={t.id}
+                  className={`work-item ${selected === t.id ? "is-on" : ""} ${t.status === "awaiting_approval" ? "task-card--waiting" : ""}`}
+                  onClick={() => navigate("work", t.id)}
+                >
                   <div className="work-item__top">
                     <span>
                       <Avatar employee={e} size={22} /> {e?.name}
                     </span>
-                    <StatusBadge task={t.status} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      {isUnread && selected !== t.id && <span className="inbox-badge">새 소식</span>}
+                      <StatusBadge task={t.status} />
+                    </div>
                   </div>
                   <strong>{t.title}</strong>
                   <small>{relativeTime(t.updatedAt)}{t.currentStep && t.status === "running" ? ` · ${t.currentStep}` : ""}</small>

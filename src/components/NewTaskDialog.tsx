@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, errorText, isDev, modeLabel, type Employee } from "../api";
+import {
+  api,
+  errorText,
+  fmtTokens,
+  fmtUsd,
+  isDev,
+  modeLabel,
+  won,
+  type Employee,
+  type Estimate,
+} from "../api";
 import { useStore } from "../store";
 import { Avatar, Icon, Modal, StatusBadge } from "./ui";
 import { TaskForm, defaultValues, missingFields, type Values } from "./TaskForm";
@@ -37,7 +47,7 @@ function Picker({ onPick }: { onPick: (e: Employee) => void }) {
   );
 }
 
-function Preflight({ employee }: { employee: Employee }) {
+function Preflight({ employee, estimate }: { employee: Employee; estimate?: Estimate | null }) {
   const { navigate, closeNewTask } = useStore();
   const { status, missing, guard } = employee.availability;
   return (
@@ -56,6 +66,22 @@ function Preflight({ employee }: { employee: Employee }) {
           <dt>비용</dt>
           <dd>{employee.costSummary}</dd>
         </div>
+        {estimate && (
+          <div>
+            <dt>예상 사용량</dt>
+            <dd>
+              약 <strong style={{ fontFamily: "var(--font-mono)" }}>{fmtTokens(estimate.estTotal)}</strong> 토큰
+              {estimate.free ? (
+                <span className="model-chip model-chip--free" style={{ marginLeft: 6 }}>실제 0원 (무료 모델)</span>
+              ) : (
+                <> · 환산 <strong style={{ fontFamily: "var(--font-mono)" }}>{won(estimate.estKrw)}</strong> ({fmtUsd(estimate.estUsd)})</>
+              )}
+              <small style={{ display: "block", color: "var(--muted)", fontSize: 11 }}>
+                산출 기준: {estimate.basis === "history" ? `동일 직원 과거 ${estimate.samples}건 평균` : "글자 수 기반 휴리스틱 추정"}
+              </small>
+            </dd>
+          </div>
+        )}
       </dl>
       {status === "setup_required" && (
         <div className="callout callout--warning">
@@ -107,6 +133,7 @@ function TaskFormView({ employee, prefill, onBack }: { employee: Employee; prefi
   const [recentUsed, setRecentUsed] = useState(false);
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
   const missing = useMemo(() => missingFields(employee.form, values), [employee, values]);
   const blocked = employee.availability.status === "setup_required" || employee.availability.status === "guarded";
   const isQuote = employee.id === "doyun";
@@ -116,6 +143,13 @@ function TaskFormView({ employee, prefill, onBack }: { employee: Employee; prefi
   useEffect(() => {
     if (!prefill) api.getRecentInput(employee.id).then(setRecent).catch(() => undefined);
   }, [employee.id, prefill]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      api.estimateTask(employee.id, values).then(setEstimate).catch(() => setEstimate(null));
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [employee.id, values]);
 
   const submit = async () => {
     setBusy(true);
@@ -152,7 +186,7 @@ function TaskFormView({ employee, prefill, onBack }: { employee: Employee; prefi
         <input value={title} maxLength={120} placeholder="비워 두면 입력 내용으로 이름을 지어 드립니다" onChange={(e) => setTitle(e.target.value)} />
       </div>
       <TaskForm form={employee.form} values={values} onChange={setValues} />
-      <Preflight employee={employee} />
+      <Preflight employee={employee} estimate={estimate} />
       <label className="check check--ack">
         <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
         <span>

@@ -53,6 +53,7 @@ export function OfficePage() {
             selected={selected}
             onSelect={setSelected}
             onBoss={() => navigate("work")}
+            onTaskClick={(taskId) => navigate("work", taskId)}
           />
         </div>
 

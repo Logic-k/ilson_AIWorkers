@@ -8,7 +8,16 @@ const policy: Record<EngineId, string> = {
   agy: "Google FAQ는 개인 요금제에서 agy를 다른 앱 안에 감싸 쓰는 방식을 ‘지원하지 않음’으로 두고, 추가 약관은 서드파티 소프트웨어를 통한 접근을 정지 사유로 둡니다.",
   claude: "Anthropic은 제3자 제품이 claude.ai 로그인·사용 한도를 제공하는 것을 승인 없이 허용하지 않습니다. 이 앱은 사장님 PC의 Claude Code를 실행만 하지만 회색 지대입니다.",
   codex: "Codex CLI는 ChatGPT 로그인으로 `codex exec` 비대화 실행을 공식 지원합니다. 계정 공유·재판매는 금지입니다.",
+  opencode: "OpenCode는 MIT 라이선스 오픈소스 CLI입니다. 기본 DeepSeek 무료 모델을 지원하며, 로그인 없이 즉시 사용할 수 있습니다. 선택적으로 콘솔 키를 등록해 유료 모델을 사용할 수도 있습니다.",
   kiro: "Kiro는 안전 모드(사장님이 직접 실행)로만 연결합니다.",
+};
+
+const planOptions: Record<EngineId, string[]> = {
+  claude: ["Free", "Pro", "Max"],
+  codex: ["Free", "Plus", "Pro"],
+  agy: ["Free", "Pro", "Ultra"],
+  opencode: ["Free (DeepSeek)", "OpenCode Zen", "Custom"],
+  kiro: ["Free", "Pro"],
 };
 
 function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings; onSave: (s: Settings) => void; onRecheck: () => void }) {
@@ -37,7 +46,7 @@ function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings;
       </p>
       {e.message && <p className="engine-card__msg">{e.message}</p>}
       <div className="engine-card__row">
-        {e.installed && (
+        {e.installed && e.id !== "opencode" && (
           <button
             className="btn btn--ghost btn--sm"
             onClick={async () => {
@@ -52,9 +61,35 @@ function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings;
             <Icon name="key" size={14} /> 로그인 창 열기
           </button>
         )}
+        {e.installed && e.id === "opencode" && (
+          <button
+            className="btn btn--ghost btn--sm"
+            onClick={async () => {
+              try {
+                await api.openLoginTerminal(e.id);
+                toast("터미널에서 opencode auth 또는 모델 키를 설정할 수 있습니다.");
+              } catch (err) {
+                toast(errorText(err), "error");
+              }
+            }}
+          >
+            <Icon name="key" size={14} /> 콘솔 키 등록 (선택)
+          </button>
+        )}
         <button className="btn btn--ghost btn--sm" onClick={onRecheck}>
           <Icon name="refresh" size={14} /> 다시 확인
         </button>
+        <select
+          className="engine-card__model"
+          style={{ maxWidth: 120 }}
+          title="구독 요금제 선택"
+          value={s.plans?.[e.id] ?? e.plan}
+          onChange={(ev) => onSave({ ...s, plans: { ...(s.plans ?? {}), [e.id]: ev.target.value } })}
+        >
+          {(planOptions[e.id] ?? [e.plan]).map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
         {e.canAuto && e.models.length > 1 && (
           <select className="engine-card__model" value={s.models[e.id] ?? (e.id === "agy" ? s.model : "")} onChange={(ev) => onSave({ ...s, models: { ...s.models, [e.id]: ev.target.value } })}>
             <option value="">기본 모델</option>
@@ -213,12 +248,27 @@ export function ConnectionsPage() {
 
       <section className="card">
         <header className="card__head">
-          <div>
-            <span className="eyebrow">팀 구성</span>
-            <h3>직원별 담당 구독</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <span className="eyebrow">팀 구성</span>
+              <h3>직원별 담당 구독</h3>
+            </div>
+            <button
+              className="btn btn--ghost btn--sm"
+              onClick={() => {
+                const next = { ...s.assignments };
+                for (const emp of aiStaff) {
+                  next[emp.id] = "opencode";
+                }
+                saveAll({ ...s, assignments: next });
+                toast("모든 AI 직원을 OpenCode(DeepSeek 무료)로 배정했습니다.", "success");
+              }}
+            >
+              <Icon name="spark" size={14} /> 모든 AI 직원을 OpenCode(DeepSeek 무료)로 배정
+            </button>
           </div>
         </header>
-        <p className="field__hint">같은 업무 안에서도 단계마다 담당 직원의 구독으로 일하고 다음 사람에게 넘깁니다. 예: 설계는 Claude Code, 화면은 Antigravity, 테스트는 Codex.</p>
+        <p className="field__hint">같은 업무 안에서도 단계마다 담당 직원의 구독으로 일하고 다음 사람에게 넘깁니다. 예: 설계는 Claude Code, 화면은 Antigravity, 테스트는 Codex, 무료 작업은 OpenCode.</p>
         <div className="assign-grid">
           {aiStaff.map((e) => (
             <label key={e.id} className="assign">
@@ -241,14 +291,17 @@ export function ConnectionsPage() {
             </label>
           ))}
         </div>
-        {usable.length === 0 && <p className="callout callout--warning">이 PC에서 구독 CLI를 찾지 못했습니다. Antigravity, Claude Code, Codex 중 하나를 설치해 주세요.</p>}
+        {usable.length === 0 && <p className="callout callout--warning">이 PC에서 구독 CLI를 찾지 못했습니다. Antigravity, Claude Code, Codex, OpenCode 중 하나를 설치해 주세요.</p>}
       </section>
 
       <section className="card">
         <header className="card__head">
           <div>
-            <span className="eyebrow">YOLO 키워드</span>
+            <span className="eyebrow">YOLO 키워드 & 안전 원칙</span>
             <h3>권한 단계별로 실제 쓰는 CLI 옵션</h3>
+            <p style={{ color: "var(--brand)", fontWeight: 600, fontSize: 13, marginTop: 4 }}>
+              🛡️ 돈 쓰거나 파일을 지우기 전에는 반드시 사장님께 먼저 물어봅니다.
+            </p>
           </div>
         </header>
         <div className="levels">

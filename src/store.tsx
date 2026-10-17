@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { listen } from "@tauri-apps/api/event";
 import { api, errorText, type Activity, type Bootstrap, type Employee, type Task } from "./api";
 
-export type Route = "office" | "home" | "employees" | "work" | "connections" | "help";
+export type Route = "office" | "home" | "employees" | "work" | "usage" | "connections" | "help";
 
 interface Toast {
   id: number;
@@ -36,7 +36,7 @@ const Ctx = createContext<Store | null>(null);
 
 function routeFromHash(): { route: Route; taskId: string | null } {
   const [path, query] = window.location.hash.replace(/^#\/?/, "").split("?");
-  const route = (["office", "home", "employees", "work", "connections", "help"] as Route[]).find((r) => r === path) ?? "office";
+  const route = (["office", "home", "employees", "work", "usage", "connections", "help"] as Route[]).find((r) => r === path) ?? "office";
   const taskId = new URLSearchParams(query ?? "").get("task");
   return { route, taskId };
 }

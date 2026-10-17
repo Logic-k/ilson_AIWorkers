@@ -16,9 +16,9 @@
 | Antigravity CLI `agy` 1.3.4 | Google AI (무료·Pro·Ultra) | `agy -p "<지시>"` | `--output-format stream-json` (init / step_update / result) | `agy models` | 지원 · **검증함** | 로그인됨 |
 | Claude Code `claude` 2.1.280 | Claude Pro/Max | `claude -p` (지시는 표준입력) | `--output-format stream-json --verbose` (system / assistant / user / result) | `claude auth status` (JSON) | 지원 · 형식 테스트만 | **로그인 안 됨** |
 | Codex CLI `codex` 0.160.0 | ChatGPT Plus/Pro | `codex exec -` (지시는 표준입력) | `--json` (thread.started / item.* / turn.completed) | `codex login status` | 지원 · **검증함** | ChatGPT 로그인됨 |
+| OpenCode `opencode` 1.18.32 | MIT 오픈소스 (DeepSeek 무료 탑재) | `opencode run --pure -f json` (지시는 표준입력) | `--format json` (step_start / message / step_finish) | `opencode models` | 지원 · **검증함** | DeepSeek 무료 사용 가능 |
 | Kiro CLI `kiro-cli` 2.24.1 | Kiro | `kiro-cli chat --no-interactive` | `--output-format stream-json` (ACP 이벤트) | `kiro-cli whoami` | 안전 모드만 | 로그인됨, **실행 시 계정 일시 정지 응답** |
 | Gemini CLI `gemini` 0.42.0 | — | `gemini -p` | `-o stream-json` | — | 미지원 | 개인 구글 계정 로그인이 2026-06-18에 끝나 API 키 없이는 쓸 수 없음 |
-| OpenCode `opencode` | 공급자별 | `opencode run --format json` | JSON 이벤트 | — | 미지원 | 대부분 공급자 API 키 기반이라 제외 |
 
 ### API 키를 절대 쓰지 않게 하는 장치
 
@@ -28,12 +28,12 @@
 
 ## 3. YOLO 키워드 (권한 단계별 실제 옵션)
 
-| 단계 | 의미 | Antigravity `agy` | Claude Code `claude` | Codex `codex exec` |
-|---|---|---|---|---|
-| 읽기 | 설계·리뷰. 고치기·명령 거부 | (옵션 없음: 헤드리스가 자동 거부) | `--permission-mode dontAsk --allowedTools Read,Grep,Glob,LS,WebSearch,WebFetch` | `-s read-only` |
-| 편집 | 파일 수정만 자동 승인 | `--mode accept-edits` | `--permission-mode acceptEdits --permission-prompts none` | `-s workspace-write` |
-| 샌드박스 실행 | 수정 + 샌드박스 안 명령 | `--mode accept-edits --sandbox --dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none --allowedTools Bash` (Windows 샌드박스 없음) | `-s workspace-write` |
-| **YOLO** | 모든 확인 생략 | `--dangerously-skip-permissions` | `--dangerously-skip-permissions` (= `--permission-mode bypassPermissions`) | `--dangerously-bypass-approvals-and-sandbox` |
+| 단계 | 의미 | Antigravity `agy` | Claude Code `claude` | Codex `codex exec` | OpenCode `opencode` |
+|---|---|---|---|---|---|
+| 읽기 | 설계·리뷰. 고치기·명령 거부 | (옵션 없음: 헤드리스가 자동 거부) | `--permission-mode dontAsk --allowedTools Read,Grep,Glob,LS,WebSearch,WebFetch` | `-s read-only` | `OPENCODE_PERMISSION='{"edit":"deny","bash":"deny"}'` |
+| 편집 | 파일 수정만 자동 승인 | `--mode accept-edits` | `--permission-mode acceptEdits --permission-prompts none` | `-s workspace-write` | `OPENCODE_PERMISSION='{"edit":"allow","bash":"deny"}'` |
+| 샌드박스 실행 | 수정 + 샌드박스 안 명령 | `--mode accept-edits --sandbox --dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none --allowedTools Bash` (Windows 샌드박스 없음) | `-s workspace-write` | `OPENCODE_PERMISSION='{"edit":"allow","bash":"ask"}'` |
+| **YOLO** | 모든 확인 생략 | `--dangerously-skip-permissions` | `--dangerously-skip-permissions` (= `--permission-mode bypassPermissions`) | `--dangerously-bypass-approvals-and-sandbox` | `OPENCODE_PERMISSION='{"edit":"allow","bash":"allow"}'` |
 
 참고로 다른 CLI의 YOLO 키워드:
 

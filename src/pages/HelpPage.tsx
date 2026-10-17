@@ -8,6 +8,7 @@ const faqs = [
   ["YOLO 모드는 무엇인가요?", "자동 모드에서 파일을 고치는 단계의 모든 확인을 생략하는 모드입니다(agy·claude는 --dangerously-skip-permissions, codex는 --dangerously-bypass-approvals-and-sandbox). 작업은 별도 작업 공간에서 하고 병합은 여전히 사장님 확인을 받지만, 명령이 샌드박스 없이 실행될 수 있습니다."],
   ["코드는 언제 내 저장소에 들어가나요?", "개발팀은 업무마다 앱 데이터 폴더의 별도 작업 공간(git worktree)에서 일합니다. 사장님이 변경 내용을 보고 ‘병합하기’를 눌러야만 원래 브랜치에 합쳐지고, ‘작업 공간 지우기’를 누르면 흔적 없이 정리됩니다."],
   ["구독 한도를 넘으면 돈이 나가나요?", "Antigravity 설정에서 AI 크레딧 초과 사용을 켜 두었다면 크레딧이 쓰일 수 있습니다. 구독 범위 안에서만 쓰려면 Antigravity의 ‘AI Credit Overages’를 Never로, CLI의 Use AI Credits를 끈 상태로 두세요."],
+  ["OpenCode는 무엇인가요?", "OpenCode는 MIT 라이선스 오픈소스 코딩 에이전트 CLI입니다. 로그인이나 유료 결제 없이도 DeepSeek V4.1 Flash 무료 모델로 즉시 코딩 및 텍스트 작업을 수행할 수 있습니다. 일손은 OpenCode 실행 시 --pure 격리 옵션을 사용해 플러그인 충돌 없이 안전하게 동작하며, 안전 모드에서는 .opencode/agents/ilson-*.md 에이전트 정의와 실행 지시서를 준비해 드립니다."],
   ["블로그에 자동으로 올려 주나요?", "아니요. 자동 발행·자동 이웃 신청은 플랫폼 약관과 계정 정지 위험이 있어 하지 않습니다. 초안의 ‘본문 서식 복사’를 눌러 블로그 편집기에 붙여 넣으세요."],
   ["중간에 앱을 꺼도 되나요?", "됩니다. 단계마다 결과를 저장해 두기 때문에, 다시 켜면 업무가 ‘멈춤’으로 보이고 이어하기를 누르면 끝낸 단계 다음부터 진행합니다."],
 ];
@@ -62,6 +63,29 @@ export function HelpPage() {
           ))}
         </div>
       </section>
+
+      <section className="card">
+        <span className="eyebrow">크레딧 & 라이선스</span>
+        <h3>앱에 사용된 오픈소스 및 에셋</h3>
+        <ul style={{ paddingLeft: 20, margin: "10px 0", display: "grid", gap: 6, fontSize: 13, color: "var(--ink-2)" }}>
+          <li>
+            <strong>Pretendard Variable</strong> — 본문 및 제목 글꼴 (SIL Open Font License 1.1)
+          </li>
+          <li>
+            <strong>Lucide Icons</strong> — 인터페이스 아이콘 (ISC License)
+          </li>
+          <li>
+            <strong>OpenCode</strong> — MIT 라이선스 오픈소스 CLI 엔진
+          </li>
+          <li>
+            <strong>models.dev</strong> — 표준 LLM 토큰 단가 기준 데이터
+          </li>
+          <li>
+            <strong>한국수출입은행</strong> — 원/달러 기준 환율 제공 API
+          </li>
+        </ul>
+      </section>
+
       <section className="card card--quiet">
         <h3>이 앱에 대해</h3>
         <p>

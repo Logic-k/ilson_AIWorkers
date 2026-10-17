@@ -1,4 +1,5 @@
-import { relativeTime, type Task } from "../api";
+import { useEffect, useState } from "react";
+import { api, fmtTokens, relativeTime, won, type Task, type UsageSummary } from "../api";
 import { useStore } from "../store";
 import { Avatar, Empty, Icon, StatusBadge } from "../components/ui";
 
@@ -30,8 +31,16 @@ function TaskRow({ task }: { task: Task }) {
 
 export function HomePage() {
   const { boot, tasks, newTask, navigate } = useStore();
+  const [summary, setSummary] = useState<UsageSummary | null>(null);
+
+  useEffect(() => {
+    api.usageSummary("7d").then(setSummary).catch(() => undefined);
+  }, []);
+
   if (!boot) return null;
   const attention = tasks.filter((t) => ["awaiting_approval", "failed", "paused"].includes(t.status));
+  const awaitingApproval = tasks.filter((t) => t.status === "awaiting_approval");
+  const newResults = tasks.filter((t) => t.status === "completed" && (!t.seenAt || new Date(t.updatedAt).getTime() > new Date(t.seenAt).getTime()));
   const running = tasks.filter((t) => t.status === "running" || t.status === "queued");
   const done = tasks.filter((t) => t.status === "completed");
   const weekAgo = Date.now() - 7 * 86400_000;
@@ -43,6 +52,24 @@ export function HomePage() {
 
   return (
     <div className="page">
+      {(awaitingApproval.length > 0 || newResults.length > 0) && (
+        <div
+          className="inbox-banner"
+          onClick={() => {
+            const target = awaitingApproval[0] || newResults[0];
+            if (target) navigate("work", target.id);
+            else navigate("work");
+          }}
+        >
+          <span>
+            📥 <strong>인박스</strong>: 사장님 차례 <strong>{awaitingApproval.length}건</strong> · 새 결과 <strong>{newResults.length}건</strong>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            업무 바로 확인하기 <Icon name="chevron" size={14} />
+          </span>
+        </div>
+      )}
+
       <section className="hero">
         <div className="hero__copy">
           <span className="eyebrow">오늘의 회사</span>
@@ -67,7 +94,14 @@ export function HomePage() {
               </>
             )}
           </h2>
-          <p>API 키 없이 사장님 구독(Antigravity·Claude Code·Codex)으로 일합니다. 코드 병합과 파일 이동은 항상 사장님 확인을 받은 뒤에 진행합니다.</p>
+          <p>
+            API 키 없이 사장님 구독(Antigravity·Claude Code·Codex·OpenCode)으로 일합니다. 코드 병합과 파일 이동은 항상 사장님 확인을 받은 뒤에 진행합니다.
+            {summary && summary.yesterdayTasks > 0 && (
+              <span style={{ display: "block", marginTop: 4, color: "var(--brand)" }}>
+                어제 완료: {summary.yesterdayTasks}건 · {fmtTokens(summary.yesterdayTokens)} 토큰
+              </span>
+            )}
+          </p>
           <button className="btn btn--primary" onClick={() => newTask()}>
             <Icon name="plus" size={16} /> 새 업무 맡기기
           </button>
@@ -80,6 +114,7 @@ export function HomePage() {
           <ul>
             <li><i className="dot dot--warning" />확인 필요 <b>{attention.length}</b></li>
             <li><i className="dot dot--positive" />이번 주 완료 <b>{doneWeek}</b></li>
+            <li><i className="dot dot--positive" />이번 주 환산 <b>{won(summary?.weekKrw ?? 0)}</b></li>
             <li><i className="dot dot--neutral" />실행 방식 <b>{safe ? "안전 모드" : "자동 모드"}</b></li>
           </ul>
         </div>

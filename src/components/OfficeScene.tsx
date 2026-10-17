@@ -82,6 +82,12 @@ function route(from: { x: number; y: number }, to: Spot): Sim["path"] {
 
 const short = (s: string, n = 16) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
+function deskProp(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h % 5;
+}
+
 interface Props {
   employees: Employee[];
   tasks: Task[];
@@ -89,9 +95,10 @@ interface Props {
   selected?: string | null;
   onSelect: (id: string) => void;
   onBoss: () => void;
+  onTaskClick?: (taskId: string) => void;
 }
 
-export function OfficeScene({ employees, tasks, activities, selected, onSelect, onBoss }: Props) {
+export function OfficeScene({ employees, tasks, activities, selected, onSelect, onBoss, onTaskClick }: Props) {
   const sims = useRef<Record<string, Sim>>(SIMS);
   const refs = useRef<Record<string, SVGGElement | null>>({});
   const prevActor = useRef(PREV_ACTOR);
@@ -396,6 +403,19 @@ export function OfficeScene({ employees, tasks, activities, selected, onSelect, 
             role="button"
             aria-label={`${e.name} ${e.role}`}
           >
+            {/* 발밑 상태 링 */}
+            <ellipse
+              cx="0"
+              cy="0"
+              rx="16"
+              ry="6"
+              className={`office-ring office-ring--${
+                v.chip?.tone === "work" ? "running" :
+                v.chip?.tone === "wait" ? "waiting" :
+                v.chip?.tone === "bad" ? "failed" :
+                v.chip?.tone === "done" ? "done" : "idle"
+              }`}
+            />
             <g className="person__body">
               <rect className="leg leg--l" x="-8" y="-17" width="6" height="17" rx="2" fill="#39414f" />
               <rect className="leg leg--r" x="2" y="-17" width="6" height="17" rx="2" fill="#39414f" />
@@ -416,13 +436,33 @@ export function OfficeScene({ employees, tasks, activities, selected, onSelect, 
               </g>
             )}
             {v.chip && (
-              <g transform="translate(0,-84)" className={`chip chip--${v.chip.tone}`}>
+              <g
+                transform="translate(0,-84)"
+                className={`chip chip--${v.chip.tone}`}
+                onClick={(ev) => {
+                  const t = tasks.find((x) => ["running", "awaiting_approval", "queued", "paused", "failed"].includes(x.status) && (x.currentActor === e.id || x.employeeId === e.id));
+                  if (t && onTaskClick) {
+                    ev.stopPropagation();
+                    onTaskClick(t.id);
+                  }
+                }}
+              >
                 <rect x="-24" y="-11" width="48" height="18" rx="9" />
                 <text y="2" textAnchor="middle">{v.chip.text}</text>
               </g>
             )}
             {v.bubble && (
-              <g transform="translate(0,-108)" className="bubble">
+              <g
+                transform="translate(0,-108)"
+                className="bubble"
+                onClick={(ev) => {
+                  const t = tasks.find((x) => ["running", "awaiting_approval", "queued", "paused", "failed"].includes(x.status) && (x.currentActor === e.id || x.employeeId === e.id));
+                  if (t && onTaskClick) {
+                    ev.stopPropagation();
+                    onTaskClick(t.id);
+                  }
+                }}
+              >
                 <rect x={-Math.max(30, v.bubble.length * 6.6) / 2 - 8} y="-14" width={Math.max(30, v.bubble.length * 6.6) + 16} height="22" rx="8" />
                 <text y="2" textAnchor="middle">{v.bubble}</text>
               </g>
@@ -444,6 +484,38 @@ export function OfficeScene({ employees, tasks, activities, selected, onSelect, 
             <rect className="screen" x={d.x + 8} y={y - 54} width="24" height="16" rx="1" fill="#46516a" />
             <rect x={d.x + 17} y={y - 36} width="6" height="6" fill="#2b313c" />
             <text x={d.x} y={y - 22.5} textAnchor="middle" className="desk__tag">{e.role.replace(" 개발자", "").replace(" 엔지니어", "")}</text>
+            {/* 고유 책상 소품 */}
+            {deskProp(e.id) === 0 && (
+              <g className="desk-prop">
+                <rect x={d.x - 24} y={y - 39} width="7" height="8" rx="1.5" fill="#fdfcf8" stroke="#b3ae9f" strokeWidth="0.8" />
+                <rect x={d.x - 26} y={y - 36} width="3" height="4" rx="1" fill="none" stroke="#b3ae9f" strokeWidth="0.8" />
+              </g>
+            )}
+            {deskProp(e.id) === 1 && (
+              <g className="desk-prop">
+                <rect x={d.x - 25} y={y - 38} width="8" height="7" rx="1.5" fill="#c4734a" />
+                <circle cx={d.x - 21} cy={y - 42} r="5" fill="#3ba569" />
+              </g>
+            )}
+            {deskProp(e.id) === 2 && (
+              <g className="desk-prop">
+                <rect x={d.x - 26} y={y - 35} width="12" height="4" rx="0.8" fill="#2d5d9e" />
+                <rect x={d.x - 25} y={y - 39} width="10" height="4" rx="0.8" fill="#d4742a" />
+              </g>
+            )}
+            {deskProp(e.id) === 3 && (
+              <g className="desk-prop">
+                <rect x={d.x - 22} y={y - 40} width="6" height="9" rx="1" fill="#7c8696" />
+                <line x1={d.x - 20} y1={y - 45} x2={d.x - 20} y2={y - 40} stroke="#2b2b2b" strokeWidth="1.2" />
+                <line x1={d.x - 18} y1={y - 44} x2={d.x - 17} y2={y - 40} stroke="#d4493d" strokeWidth="1.2" />
+              </g>
+            )}
+            {deskProp(e.id) === 4 && (
+              <g className="desk-prop">
+                <rect x={d.x - 25} y={y - 36} width="11" height="5" rx="1" fill="#e9eaec" stroke="#9aa5b4" strokeWidth="0.6" />
+                <rect x={d.x - 23} y={y - 35} width="7" height="3" fill="#3ba569" opacity="0.6" />
+              </g>
+            )}
           </g>
         );
       })}

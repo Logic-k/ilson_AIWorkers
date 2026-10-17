@@ -25,7 +25,24 @@
   --radius-sm: 9px;
   --shadow: 0 1px 2px rgba(28, 30, 33, 0.04), 0 8px 24px rgba(28, 30, 33, 0.06);
   --shadow-lg: 0 24px 60px rgba(20, 22, 26, 0.22);
-  font-family: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+  --status-running: #2563eb;
+  --status-waiting: #d97706;
+  --status-paused: #b45309;
+  --status-failed: #b91c1c;
+  --status-done: #1f7a4c;
+  --status-idle: #8a857c;
+  --status-over: #d97706;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.55;
   color: var(--ink);
@@ -592,3 +609,75 @@ button.hud-chip { cursor: pointer; }
 .levels td:first-child { font-weight: 700; white-space: nowrap; }
 .levels code { white-space: normal; }
 .person__engine text { font-size: 7.5px; font-weight: 800; fill: #fff; }
+
+/* ───────── 탭 내비게이션 ───────── */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; overflow-x: auto; }
+.tab { display: inline-flex; align-items: center; gap: 6px; padding: 10px 14px; border: 0; background: none; border-bottom: 2px solid transparent; cursor: pointer; font-weight: 600; color: var(--muted); font-size: 13.5px; transition: color .15s, border-color .15s; white-space: nowrap; }
+.tab:hover { color: var(--ink); }
+.tab.is-active { color: var(--brand); border-bottom-color: var(--brand); }
+.tab__badge { background: #efede7; color: var(--muted); font-size: 11px; padding: 1px 6px; border-radius: 10px; font-weight: 700; font-family: var(--font-mono); }
+.tab.is-active .tab__badge { background: var(--brand-soft); color: var(--brand); }
+
+/* ───────── 토큰 칩 & 모델 칩 ───────── */
+.token-chip { display: inline-flex; align-items: center; gap: 5px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 11.5px; color: var(--ink-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.model-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 700; font-family: var(--font-mono); background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); }
+.model-chip--free { background: var(--ok-soft); border-color: #b8e2cb; color: var(--ok); }
+
+/* ───────── 미터 (게이지) ───────── */
+.meter { display: grid; gap: 4px; width: 100%; }
+.meter__bar { height: 8px; background: #eae7df; border-radius: 4px; overflow: hidden; position: relative; }
+.meter__fill { height: 100%; border-radius: 4px; transition: width 0.3s ease, background-color 0.3s ease; }
+.meter__fill--ok { background-color: var(--ok); }
+.meter__fill--warn { background-color: var(--warn); }
+.meter__fill--bad { background-color: var(--bad); }
+.meter__meta { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
+.meter__val { font-family: var(--font-mono); font-weight: 600; color: var(--ink-2); }
+
+/* ───────── 사무실 발밑 링 & 데스크 소품 ───────── */
+.office-ring { stroke-width: 2.5; fill: none; transition: stroke .2s; }
+.office-ring--running { stroke: var(--status-running); stroke-dasharray: 4 2; animation: ring-spin 4s linear infinite; }
+.office-ring--waiting { stroke: var(--status-waiting); stroke-dasharray: 6 3; animation: ring-spin 2s linear infinite; }
+.office-ring--paused { stroke: var(--status-paused); }
+.office-ring--failed { stroke: var(--status-failed); }
+.office-ring--done { stroke: var(--status-done); }
+.office-ring--idle { stroke: var(--status-idle); opacity: 0.4; }
+@keyframes ring-spin { 100% { stroke-dashoffset: -36; } }
+
+/* ───────── 인박스 & 알림 배지 ───────── */
+.inbox-banner { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-radius: var(--radius); background: var(--accent-soft); border: 1px solid #f0cb9e; color: #7a3a0e; font-weight: 600; font-size: 13.5px; cursor: pointer; transition: background .15s; }
+.inbox-banner:hover { background: #fae4d0; }
+.inbox-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px; font-size: 11px; font-weight: 800; background: var(--status-waiting); color: #fff; margin-left: 6px; font-family: var(--font-mono); }
+.inbox-badge--seen { background: var(--brand); }
+
+/* ───────── 사용량 & 예산 페이지 ───────── */
+.usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.usage-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; display: grid; gap: 8px; }
+.usage-card__val { font-size: 24px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.usage-card__sub { font-size: 12.5px; color: var(--muted); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.usage-table th, .usage-table td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; }
+.usage-table th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.usage-table td.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.usage-table th.num { text-align: right; }
+.quota-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; }
+
+/* ───────── 업무 헤더 토큰 배너 ───────── */
+.task-header__tokens { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; font-size: 12.5px; margin-top: 10px; }
+.task-header__tokens dt { color: var(--muted); font-weight: 600; }
+.task-header__tokens dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ───────── 사장님 차례 강조 (Takeover on Waiting) ───────── */
+.task-card--waiting { border-color: var(--status-waiting) !important; background: linear-gradient(180deg, #fffbf5, #fff) !important; box-shadow: 0 4px 16px rgba(217, 119, 6, 0.12) !important; }
+
+/* ───────── 접근성: 모션 감소 ───────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .office-ring--running, .office-ring--waiting { animation: none !important; }
+  .chip--wait { animation: none !important; }
+  .side__live i { animation: none !important; }
+}
+

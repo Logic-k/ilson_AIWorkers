@@ -30,12 +30,19 @@ AIMAX(aimax.ai.kr)의 "AI 직원 인력사무소" 방식을 REA로 분석해 참
 | Antigravity CLI (`agy`) | Google AI | 가능 |
 | Claude Code (`claude`) | Claude Pro/Max | 가능 |
 | Codex CLI (`codex`) | ChatGPT Plus/Pro | 가능 |
+| OpenCode (`opencode`) | 오픈소스 (DeepSeek 무료 탑재) | 가능 |
 | Kiro CLI (`kiro-cli`) | Kiro | 안전 모드만 |
 
-- **직원별 담당 구독:** 연결 및 설정에서 직원마다 엔진을 고릅니다. 같은 업무 안에서도 단계마다 담당 직원의 구독으로 일하고 다음 사람에게 넘깁니다.
-- **안전 모드(기본):** 앱이 지시서(`.ilson/TASK.md`)와 에이전트 정의(Antigravity `.agents/agents/`, Claude Code `.claude/agents/`)를 준비하면, 사장님이 Antigravity나 터미널에서 직접 실행합니다. 앱은 직원들이 남기는 상태·보고서 파일과 git 변경을 지켜보다가 다음 단계로 넘깁니다.
-- **자동 모드:** 엔진마다 위험 안내에 동의한 엔진만 앱이 헤드리스로 실행합니다. 동의하지 않은 엔진의 차례에서는 그 단계만 안전 모드로 바뀝니다. Google·Anthropic 약관상 앱이 구독 CLI를 감싸 실행하는 방식에는 계정 위험이 있어 기본값은 꺼져 있습니다(자세한 내용은 조사 문서).
+- **직원별 담당 구독:** 연결 및 설정에서 직원마다 엔진을 고릅니다. 같은 업무 안에서도 단계마다 담당 직원의 구독으로 일하고 다음 사람에게 넘깁니다. (예: 설계는 Claude Code, 화면은 Antigravity, 테스트는 Codex, 무료 작업은 OpenCode)
+- **안전 모드(기본):** 앱이 지시서(`.ilson/TASK.md`)와 에이전트 정의(Antigravity `.agents/agents/`, Claude Code `.claude/agents/`, OpenCode `.opencode/agents/`)를 준비하면, 사장님이 각 CLI나 터미널에서 직접 실행합니다. 앱은 직원들이 남기는 상태·보고서 파일과 git 변경을 지켜보다가 다음 단계로 넘깁니다.
+- **자동 모드:** 엔진마다 위험 안내에 동의한 엔진만 앱이 헤드리스로 실행합니다. 동의하지 않은 엔진의 차례에서는 그 단계만 안전 모드로 바뀝니다. OpenCode는 `--pure` 격리 모드와 `OPENCODE_PERMISSION` 인라인 JSON 제어를 통해 플러그인 충돌 없이 안전하게 실행됩니다.
 - **YOLO 모드:** 자동 모드에서 파일을 고치는 단계의 모든 확인을 생략합니다. `agy`/`claude`는 `--dangerously-skip-permissions`, `codex`는 `--dangerously-bypass-approvals-and-sandbox`를 씁니다.
+
+## 토큰 사용량 & 예산 모니터링 (Usage & Budget)
+
+1. **실제 결제 0원 유지:** 사장님이 이미 가입한 구독 CLI 및 OpenCode의 내장 무료 모델(`deepseek-v4.1-flash-free`)만을 사용하여 추가 종량제 API 요금이 발생하지 않습니다.
+2. **models.dev 표준 단가 기반 환산 비용:** 실행된 토큰 수(입력·출력·캐시·추론)를 models.dev 최신 단가표와 한국수출입은행 환율로 환산하여 대시보드에서 비교·확인합니다.
+3. **일일 예산 상한 (Safety Caps):** 설정된 일일 토큰/비용 상한의 80% 도달 시 시각적 경고, 100% 도달 시 자동 실행을 일시 중지하여 계정 쿼터 고갈을 방지합니다.
 
 ## 일하는 원칙
 
@@ -44,6 +51,7 @@ AIMAX(aimax.ai.kr)의 "AI 직원 인력사무소" 방식을 REA로 분석해 참
 3. **멈춰도 이어서** — 단계마다 결과를 SQLite에 저장해, 앱을 꺼도 끝낸 단계 다음부터 이어 합니다.
 4. **반복 오류 가드** — 같은 직원이 같은 이유로 두 번 연달아 실패하면 "조치했어요"를 누를 때까지 새 업무를 막습니다.
 5. **파일 정리는 이동만** — 수아는 계획을 먼저 보여 주고 확인을 받은 뒤 옮기며, 언제든 되돌릴 수 있습니다.
+6. **디자인 규율 (`DESIGN.md`)** — 외부 UI 프레임워크 없이 Pretendard Variable 및 Lucide Icons를 사용하며, 5단계 통일 상태 토큰과 5탭 업무 상세 뷰(`결과물 / 증빙 / 변경 내용 / 토큰 / 기록`)를 제공합니다.
 
 ## 실행
 

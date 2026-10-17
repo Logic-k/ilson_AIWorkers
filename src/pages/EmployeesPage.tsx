@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { isDev, modeLabel, relativeTime } from "../api";
+import { isDev, modeLabel, relativeTime, shortModelLabel } from "../api";
 import { useStore } from "../store";
 import { Avatar, Empty, Icon, StatusBadge } from "../components/ui";
 import { GuardAck } from "../components/NewTaskDialog";
@@ -28,6 +28,10 @@ export function EmployeesPage() {
   const e = list.find((x) => x.id === selected) ?? list[0];
   const lastTask = e && tasks.find((t) => t.employeeId === e.id);
 
+  const selectedEngineId = e?.engine?.id;
+  const selectedModel = boot.settings.models[selectedEngineId ?? ""] || (selectedEngineId === "opencode" ? "deepseek-v4.1-flash-free" : "기본 모델");
+  const selectedIsFree = selectedModel.endsWith("-free") || selectedEngineId === "opencode";
+
   return (
     <div className="page">
       <div className="toolbar">
@@ -55,6 +59,11 @@ export function EmployeesPage() {
                 <span className="emp-item__tags">
                   <StatusBadge employee={x.availability.status} />
                   <em>{modeLabel[x.mode]}</em>
+                  {x.engine && (
+                    <span className={`model-chip ${x.engine.id === "opencode" ? "model-chip--free" : ""}`}>
+                      {x.engine.label}
+                    </span>
+                  )}
                 </span>
               </span>
             </button>
@@ -69,6 +78,11 @@ export function EmployeesPage() {
                 <div className="emp-detail__badges">
                   <StatusBadge employee={e.availability.status} />
                   <span className="tag">{modeLabel[e.mode]}</span>
+                  {e.engine && (
+                    <span className={`model-chip ${selectedIsFree ? "model-chip--free" : ""}`}>
+                      {e.engine.label} · {shortModelLabel(selectedModel)}
+                    </span>
+                  )}
                 </div>
                 <h2>{e.name}</h2>
                 <p>
@@ -89,7 +103,7 @@ export function EmployeesPage() {
               </div>
               <div>
                 <dt>비용 기준</dt>
-                <dd>{e.costSummary}</dd>
+                <dd>{selectedIsFree ? `실제 0원 (무료 모델) · ${e.costSummary}` : e.costSummary}</dd>
               </div>
               <div>
                 <dt>최근 업무</dt>
