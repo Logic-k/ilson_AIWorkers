@@ -138,19 +138,41 @@ impl Kind {
         let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
         vec![
+            ilson_bin_dir(),
             roaming.join("npm").join("node_modules").join("opencode-ai").join("bin"),
             roaming.join("npm"),
             home.join(".opencode").join("bin"),
             home.join("scoop").join("shims"),
             home.join(".local").join("bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
         ]
     }
 }
 
-/// 실행 파일 위치: OpenCode는 네이티브 바이너리(`node_modules/opencode-ai/bin/opencode.exe`)를 .cmd 래퍼보다 먼저 찾는다.
+/// 일손 앱 전용 OpenCode 단독 바이너리 보관 경로 (Node.js 없이 단독 구동).
+pub fn ilson_bin_dir() -> PathBuf {
+    if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("kr.ilson.desktop")
+            .join("bin")
+    } else {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".opencode")
+            .join("bin")
+    }
+}
+
+/// 실행 파일 위치: 일손 전용 바이너리(`ilson_bin_dir`) 및 네이티브 바이너리(`node_modules/opencode-ai/bin/opencode.exe`)를 .cmd 래퍼보다 먼저 찾는다.
 pub fn locate(kind: Kind) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if kind == Kind::Opencode {
+        dirs.push(ilson_bin_dir());
         if let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) {
             dirs.push(roaming.join("npm").join("node_modules").join("opencode-ai").join("bin"));
         }
@@ -168,6 +190,141 @@ pub fn locate(kind: Kind) -> Option<PathBuf> {
         }
     }
     None
+}
+
+static INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// 사용자의 PC에 OpenCode가 없을 때, Node.js나 터미널 없이 공식 GitHub 릴리스의 단독 실행 바이너리를 자동 다운로드·설치한다.
+pub async fn ensure_opencode_installed() -> Result<PathBuf> {
+    if let Some(existing) = locate(Kind::Opencode) {
+        return Ok(existing);
+    }
+    let lock = INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
+    if let Some(existing) = locate(Kind::Opencode) {
+        return Ok(existing);
+    }
+
+    let asset = if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "aarch64") {
+            "opencode-windows-arm64.zip"
+        } else {
+            "opencode-windows-x64.zip"
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "opencode-darwin-arm64.zip"
+        } else {
+            "opencode-darwin-x64.zip"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "opencode-linux-arm64.tar.gz"
+    } else {
+        "opencode-linux-x64.tar.gz"
+    };
+
+    let url = format!("https://github.com/anomalyco/opencode/releases/latest/download/{asset}");
+    let bin_dir = ilson_bin_dir();
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| anyhow!("OpenCode 설치 폴더를 만들지 못했습니다: {e}"))?;
+
+    let client = reqwest::Client::builder()
+        .user_agent("ilson-desktop-installer/0.1")
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| anyhow!("네트워크 클라이언트를 준비하지 못했습니다: {e}"))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("OpenCode 공식 릴리스를 내려받지 못했습니다: {e}"))?;
+
+    if !resp.status().is_success() {
+        bail!("OpenCode 다운로드 서버 응답 오류: HTTP {}", resp.status());
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("OpenCode 설치 파일을 읽는 중 오류가 발생했습니다: {e}"))?;
+
+    let archive_path = bin_dir.join(asset);
+    std::fs::write(&archive_path, &bytes)
+        .map_err(|e| anyhow!("OpenCode 압축 파일을 저장하지 못했습니다: {e}"))?;
+
+    let exe_name = if cfg!(windows) { "opencode.exe" } else { "opencode" };
+    let target_exe = bin_dir.join(exe_name);
+
+    // 1차 시도: OS 기본 내장 tar (Windows 10/11, macOS, Linux 모두 zip/tar.gz 해제 지원)
+    let mut tar_cmd = tokio::process::Command::new("tar");
+    tar_cmd.args([
+        "-xf",
+        &archive_path.to_string_lossy(),
+        "-C",
+        &bin_dir.to_string_lossy(),
+    ]);
+    #[cfg(windows)]
+    tar_cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = tar_cmd.status().await;
+
+    // 2차 폴백: tar로 풀리지 않았을 경우 Windows는 PowerShell Expand-Archive, macOS/Linux는 unzip
+    if !target_exe.is_file() {
+        #[cfg(windows)]
+        {
+            let mut ps = tokio::process::Command::new("powershell");
+            ps.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                    archive_path.to_string_lossy().replace('\'', "''"),
+                    bin_dir.to_string_lossy().replace('\'', "''")
+                ),
+            ]);
+            ps.creation_flags(CREATE_NO_WINDOW);
+            let _ = ps.status().await;
+        }
+        #[cfg(not(windows))]
+        {
+            if asset.ends_with(".zip") {
+                let _ = tokio::process::Command::new("unzip")
+                    .args([
+                        "-o",
+                        &archive_path.to_string_lossy(),
+                        "-d",
+                        &bin_dir.to_string_lossy(),
+                    ])
+                    .status()
+                    .await;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&archive_path);
+
+    #[cfg(unix)]
+    {
+        if target_exe.is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&target_exe, std::fs::Permissions::from_mode(0o755));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("xattr")
+                .args(["-d", "com.apple.quarantine", &target_exe.to_string_lossy()])
+                .output();
+        }
+    }
+
+    if target_exe.is_file() {
+        Ok(target_exe)
+    } else if let Some(found) = locate(Kind::Opencode) {
+        Ok(found)
+    } else {
+        bail!("OpenCode 압축을 해제했으나 실행 파일을 찾지 못했습니다.")
+    }
 }
 
 fn ensure_opencode_isolated_config() -> Option<(PathBuf, PathBuf)> {
@@ -309,7 +466,7 @@ pub async fn status(kind: Kind) -> EngineStatus {
         ..Default::default()
     };
     let Some(exe) = locate(kind) else {
-        st.message = Some("OpenCode를 찾지 못했습니다. `npm i -g opencode-ai@latest`로 설치할 수 있습니다.".into());
+        st.message = Some("이 PC에서 OpenCode를 찾지 못했습니다. 아래 ‘원클릭 자동 설치’를 누르거나 첫 업무를 시작하면 Node.js 없이 자동으로 설치됩니다.".into());
         return st;
     };
     st.installed = true;
@@ -745,7 +902,17 @@ impl Collector {
 pub async fn run(opts: RunOptions<'_>, mut on_activity: impl FnMut(Activity)) -> Result<RunResult> {
     let started = Instant::now();
     let kind = opts.kind;
-    let exe = locate(kind).ok_or_else(|| anyhow!("OpenCode CLI를 찾지 못했습니다. `npm i -g opencode-ai@latest`로 설치해 주세요."))?;
+    let exe = match locate(kind) {
+        Some(p) => p,
+        None => {
+            on_activity(Activity::new(
+                "running",
+                "이 PC에 OpenCode 엔진이 없어 공식 단독 실행 파일을 자동 설치하고 있습니다 (최초 1회)...",
+                true,
+            ));
+            ensure_opencode_installed().await?
+        }
+    };
     let mut cmd = command_for(kind, &exe);
     cmd.current_dir(opts.cwd);
     let model = opts.model.as_deref().filter(|m| !m.is_empty());

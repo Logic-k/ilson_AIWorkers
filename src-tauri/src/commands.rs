@@ -17,8 +17,8 @@ type Engines = HashMap<String, engine::EngineStatus>;
 fn availability(conn: &rusqlite::Connection, employee: &Value, settings: &Settings, engines: &Engines, tasks: &[Task]) -> Value {
     let id = employee["id"].as_str().unwrap_or("");
     let kind = settings.engine_for(id);
-    // 아직 확인하지 않았으면 막지 않는다 (실행할 때 다시 확인된다).
-    let engine_ready = engines.get(kind.id()).is_none_or(|e| e.signed_in);
+    // OpenCode는 미설치 PC에서도 최초 실행 시 단독 바이너리를 자동 설치하므로 막지 않는다.
+    let engine_ready = kind == engine::Kind::Opencode || engines.get(kind.id()).is_none_or(|e| e.signed_in);
     let engine_need = format!("{} 로그인", kind.label());
     let mut missing: Vec<String> = vec![];
     for req in roster::requirements(id) {
@@ -324,6 +324,19 @@ pub async fn engine_status(app: AppHandle) -> CmdResult<Vec<engine::EngineStatus
     let all = check_engines().await;
     *app.state::<AppState>().engines.lock().unwrap() = all.clone();
     Ok(engine::ALL.iter().filter_map(|k| all.get(k.id()).cloned()).collect())
+}
+
+#[tauri::command]
+pub async fn install_engine(app: AppHandle) -> CmdResult<engine::EngineStatus> {
+    engine::ensure_opencode_installed().await.map_err(err)?;
+    let st = engine::status(engine::Kind::Opencode).await;
+    app.state::<AppState>()
+        .engines
+        .lock()
+        .unwrap()
+        .insert(st.id.clone(), st.clone());
+    let _ = app.emit("engine-updated", ());
+    Ok(st)
 }
 
 #[tauri::command]

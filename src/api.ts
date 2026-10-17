@@ -506,6 +506,7 @@ export const api = {
   getRecentInput: (employeeId: string) => invoke<Record<string, unknown> | null>("get_recent_input", { employeeId }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   engineStatus: () => invoke<EngineStatus[]>("engine_status"),
+  installEngine: () => invoke<EngineStatus>("install_engine"),
   openLoginTerminal: (engine: EngineId) => invoke<void>("open_login_terminal", { engine }),
   openTerminal: (folder: string) => invoke<void>("open_terminal", { folder }),
   activities: () => invoke<Activity[]>("activities"),

@@ -15,9 +15,10 @@ const planOptions: Partial<Record<EngineId, string[]>> = {
 function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings; onSave: (s: Settings) => void; onRecheck: () => void }) {
   const { toast } = useStore();
   const [ack, setAck] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const acked = !!s.autoAcks[e.id];
   const tone = !e.installed ? "neutral" : e.signedIn ? "positive" : "warning";
-  const label = !e.installed ? "설치 안 됨" : e.signedIn ? "구독 로그인됨" : "로그인 필요";
+  const label = !e.installed ? "자동 설치 대기" : e.signedIn ? "구독 로그인됨" : "로그인 필요";
   return (
     <article className="engine-card">
       <header>
@@ -34,10 +35,31 @@ function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings;
         </span>
       </header>
       <p className="engine-card__meta">
-        {e.installed ? `v${e.version ?? "?"}${e.login ? ` · ${e.login}` : ""}` : "이 PC에서 찾지 못했습니다"}
+        {e.installed ? `v${e.version ?? "?"}${e.login ? ` · ${e.login}` : ""}` : "미설치 PC (Node.js 없이 단독 실행 파일 자동 설치 지원)"}
       </p>
       {e.message && <p className="engine-card__msg">{e.message}</p>}
       <div className="engine-card__row">
+        {!e.installed && e.id === "opencode" && (
+          <button
+            className="btn btn--primary btn--sm"
+            disabled={installing}
+            onClick={async () => {
+              setInstalling(true);
+              try {
+                toast("OpenCode 공식 단독 실행 파일을 내려받아 설치하고 있습니다…");
+                await api.installEngine();
+                onRecheck();
+                toast("OpenCode 자동 설치가 완료되었습니다! 바로 무료 모델을 사용할 수 있습니다.", "success");
+              } catch (err) {
+                toast(errorText(err), "error");
+              } finally {
+                setInstalling(false);
+              }
+            }}
+          >
+            <Icon name="spark" size={14} /> {installing ? "자동 설치 중…" : "원클릭 자동 설치 (Node.js 불필요)"}
+          </button>
+        )}
         {e.installed && e.id !== "opencode" && (
           <button
             className="btn btn--ghost btn--sm"

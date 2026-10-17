@@ -58,9 +58,12 @@ pub fn run() {
                 external_done: Mutex::new(HashSet::new()),
                 quota: Mutex::new(HashMap::new()),
             });
-            // 시작할 때 구독 엔진들의 설치·로그인 상태를 한 번 확인해 둔다 (사용량을 쓰지 않는다).
+            // 시작할 때 OpenCode가 없으면 백그라운드에서 단독 실행 파일을 자동 설치하고 상태를 확인한다.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                if engine::locate(engine::Kind::Opencode).is_none() {
+                    let _ = engine::ensure_opencode_installed().await;
+                }
                 let all = commands::check_engines().await;
                 *handle.state::<AppState>().engines.lock().unwrap() = all;
                 let _ = handle.emit("engine-updated", ());
@@ -84,6 +87,7 @@ pub fn run() {
             commands::get_recent_input,
             commands::save_settings,
             commands::engine_status,
+            commands::install_engine,
             commands::open_login_terminal,
             commands::activities,
             commands::task_diff,
