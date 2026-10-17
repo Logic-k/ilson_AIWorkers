@@ -4,26 +4,18 @@ import { useStore } from "../store";
 import { Avatar, Icon } from "../components/ui";
 
 /** 엔진별 자동 실행 시 약관 안내 (공식 문서 기준 요약) */
-const policy: Record<EngineId, string> = {
-  agy: "Google FAQ는 개인 요금제에서 agy를 다른 앱 안에 감싸 쓰는 방식을 ‘지원하지 않음’으로 두고, 추가 약관은 서드파티 소프트웨어를 통한 접근을 정지 사유로 둡니다.",
-  claude: "Anthropic은 제3자 제품이 claude.ai 로그인·사용 한도를 제공하는 것을 승인 없이 허용하지 않습니다. 이 앱은 사장님 PC의 Claude Code를 실행만 하지만 회색 지대입니다.",
-  codex: "Codex CLI는 ChatGPT 로그인으로 `codex exec` 비대화 실행을 공식 지원합니다. 계정 공유·재판매는 금지입니다.",
+const policy: Partial<Record<EngineId, string>> = {
   opencode: "OpenCode는 MIT 라이선스 오픈소스 CLI입니다. 기본 DeepSeek 무료 모델을 지원하며, 로그인 없이 즉시 사용할 수 있습니다. 선택적으로 콘솔 키를 등록해 유료 모델을 사용할 수도 있습니다.",
-  kiro: "Kiro는 안전 모드(사장님이 직접 실행)로만 연결합니다.",
 };
 
-const planOptions: Record<EngineId, string[]> = {
-  claude: ["Free", "Pro", "Max"],
-  codex: ["Free", "Plus", "Pro"],
-  agy: ["Free", "Pro", "Ultra"],
+const planOptions: Partial<Record<EngineId, string[]>> = {
   opencode: ["Free (DeepSeek)", "OpenCode Zen", "Custom"],
-  kiro: ["Free", "Pro"],
 };
 
 function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings; onSave: (s: Settings) => void; onRecheck: () => void }) {
   const { toast } = useStore();
   const [ack, setAck] = useState(false);
-  const acked = !!s.autoAcks[e.id] || (e.id === "agy" && !!s.autoAckAt);
+  const acked = !!s.autoAcks[e.id];
   const tone = !e.installed ? "neutral" : e.signedIn ? "positive" : "warning";
   const label = !e.installed ? "설치 안 됨" : e.signedIn ? "구독 로그인됨" : "로그인 필요";
   return (
@@ -91,7 +83,7 @@ function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings;
           ))}
         </select>
         {e.canAuto && e.models.length > 1 && (
-          <select className="engine-card__model" value={s.models[e.id] ?? (e.id === "agy" ? s.model : "")} onChange={(ev) => onSave({ ...s, models: { ...s.models, [e.id]: ev.target.value } })}>
+          <select className="engine-card__model" value={s.models[e.id] ?? ""} onChange={(ev) => onSave({ ...s, models: { ...s.models, [e.id]: ev.target.value } })}>
             <option value="">기본 모델</option>
             {e.models.filter((m) => m.id).map((m) => (
               <option key={m.id} value={m.id}>
@@ -111,7 +103,7 @@ function EngineCard({ e, s, onSave, onRecheck }: { e: EngineStatus; s: Settings;
                 onClick={() => {
                   const next = { ...s.autoAcks };
                   delete next[e.id];
-                  onSave({ ...s, autoAcks: next, autoAckAt: e.id === "agy" ? null : s.autoAckAt });
+                  onSave({ ...s, autoAcks: next });
                 }}
               >
                 철회
@@ -224,7 +216,7 @@ export function ConnectionsPage() {
             <input type="radio" name="mode" checked={!auto} onChange={() => saveAll({ ...s, engineMode: "safe" })} />
             <span>
               <strong>안전 모드 (권장)</strong>
-              <small>앱이 지시서와 에이전트 정의를 준비하고, 사장님이 각 구독 CLI(Antigravity·Claude Code·Codex·Kiro)에서 직접 실행합니다. 앱은 진행을 지켜보며 사무실 연출·다음 단계·병합을 맡습니다.</small>
+              <small>앱이 지시서와 에이전트 정의를 준비하고, 사장님이 OpenCode CLI에서 직접 실행합니다. 앱은 진행을 지켜보며 사무실 연출·다음 단계·병합을 맡습니다.</small>
             </span>
           </label>
           <label className={`model ${auto ? "is-on" : ""}`}>
@@ -268,7 +260,7 @@ export function ConnectionsPage() {
             </button>
           </div>
         </header>
-        <p className="field__hint">같은 업무 안에서도 단계마다 담당 직원의 구독으로 일하고 다음 사람에게 넘깁니다. 예: 설계는 Claude Code, 화면은 Antigravity, 테스트는 Codex, 무료 작업은 OpenCode.</p>
+        <p className="field__hint">모든 AI 직원은 OpenCode(기본 DeepSeek Flash 무료 모델) 엔진으로 동작합니다.</p>
         <div className="assign-grid">
           {aiStaff.map((e) => (
             <label key={e.id} className="assign">
@@ -278,7 +270,7 @@ export function ConnectionsPage() {
                 <small>{e.role}</small>
               </span>
               <select
-                value={s.assignments[e.id] ?? "agy"}
+                value={s.assignments[e.id] ?? "opencode"}
                 onChange={(ev) => saveAll({ ...s, assignments: { ...s.assignments, [e.id]: ev.target.value as EngineId } })}
               >
                 {boot.engines.map((en) => (
@@ -291,7 +283,7 @@ export function ConnectionsPage() {
             </label>
           ))}
         </div>
-        {usable.length === 0 && <p className="callout callout--warning">이 PC에서 구독 CLI를 찾지 못했습니다. Antigravity, Claude Code, Codex, OpenCode 중 하나를 설치해 주세요.</p>}
+        {usable.length === 0 && <p className="callout callout--warning">이 PC에서 OpenCode CLI를 찾지 못했습니다. `npm i -g opencode`로 설치해 주세요.</p>}
       </section>
 
       <section className="card">

@@ -593,11 +593,7 @@ pub fn classify_chars(text: &str) -> CharBuckets {
 
 pub fn engine_overhead(engine: Kind) -> u64 {
     match engine {
-        Kind::Agy => 10_000,
-        Kind::Claude => 15_000,
-        Kind::Codex => 20_000,
         Kind::Opencode => 6_000,
-        Kind::Kiro => 8_000,
     }
 }
 
@@ -605,10 +601,7 @@ pub fn engine_overhead(engine: Kind) -> u64 {
 pub fn estimate_prompt_tokens(engine: Kind, prompt: &str) -> u64 {
     let b = classify_chars(prompt);
     let (k_ko, k_cjk, k_lat, k_code) = match engine {
-        Kind::Agy => (0.58, 0.60, 0.22, 0.30),
-        Kind::Claude => (1.05, 1.00, 0.36, 0.48),
-        Kind::Codex => (0.65, 0.70, 0.22, 0.30),
-        Kind::Opencode | Kind::Kiro => (0.90, 0.60, 0.30, 0.33),
+        Kind::Opencode => (0.90, 0.60, 0.30, 0.33),
     };
     let body = b.hangul as f64 * k_ko
         + b.cjk_kana as f64 * k_cjk

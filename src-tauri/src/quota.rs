@@ -1,4 +1,4 @@
-//! 구독 한도 조회 (§B-2). 사장님이 "지금 확인" 버튼을 눌렀을 때만 CLI(`/usage`)를 호출하고 10분간 캐시한다.
+//! 구독 한도 조회. OpenCode 사용량과 추정치를 계산해 돌려준다.
 
 use crate::engine::{self, Kind};
 use crate::models::Settings;
@@ -7,10 +7,7 @@ use anyhow::Result;
 use chrono::{Duration, Local};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::process::Stdio;
 use std::time::Instant;
-use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,41 +50,10 @@ pub async fn check_all(state: &AppState, refresh: bool) -> Result<Vec<EngineQuot
         crate::db::load_settings(&conn)?
     };
 
-    // refresh == false이고 캐시가 없으면 CLI는 실행하지 않고 앱 추정치만 즉시 돌려준다.
-    let (agy_cli, claude_cli) = if refresh {
-        tokio::join!(probe_agy(), probe_claude())
-    } else {
-        (None, None)
-    };
-
     let conn = state.db.lock().unwrap();
     let mut out = Vec::new();
-    for kind in [Kind::Agy, Kind::Claude, Kind::Codex, Kind::Opencode] {
-        let eq = match kind {
-            Kind::Agy => {
-                if let Some(ref res) = agy_cli {
-                    res.clone()
-                } else {
-                    let mut est = app_estimated(&conn, &settings, kind)?;
-                    if !refresh {
-                        est.message = Some("‘지금 확인’을 누르면 Antigravity CLI 한도를 조회합니다.".into());
-                    }
-                    est
-                }
-            }
-            Kind::Claude => {
-                if let Some(ref res) = claude_cli {
-                    res.clone()
-                } else {
-                    let mut est = app_estimated(&conn, &settings, kind)?;
-                    if !refresh {
-                        est.message = Some("‘지금 확인’을 누르면 Claude Code CLI 한도를 조회합니다.".into());
-                    }
-                    est
-                }
-            }
-            _ => app_estimated(&conn, &settings, kind)?,
-        };
+    for kind in engine::ALL {
+        let eq = app_estimated(&conn, &settings, kind)?;
         out.push(eq);
     }
     drop(conn);
@@ -123,36 +89,29 @@ fn app_estimated(conn: &Connection, settings: &Settings, kind: Kind) -> Result<E
         .plans
         .get(kind.id())
         .map(String::as_str)
-        .unwrap_or(if kind == Kind::Opencode { "free" } else { "" });
+        .unwrap_or("free");
 
-    let (cap_5h, cap_7d, cap_30d, plan_label, note) = match (kind, plan_code) {
-        (Kind::Opencode, "go") => (
+    let (cap_5h, cap_7d, cap_30d, plan_label, note) = match plan_code {
+        "go" => (
             Some(16.0),
             Some(40.0),
             Some(80.0),
             "OpenCode Go ($10/월)".to_string(),
             Some("Go 약관 기준 한도(5시간 $16 · 주 $40 · 월 $80)로 추정한 비율입니다.".to_string()),
         ),
-        (Kind::Opencode, "go_plus") => (
+        "go_plus" => (
             Some(32.0),
             Some(80.0),
             Some(160.0),
             "OpenCode Go Plus ($40/월)".to_string(),
             Some("Go Plus 약관 기준 한도(5시간 $32 · 주 $80 · 월 $160)로 추정한 비율입니다.".to_string()),
         ),
-        (Kind::Opencode, _) => (
+        _ => (
             None,
             None,
             None,
             "OpenCode 무료 모델".to_string(),
             Some("무료 모델 한도는 OpenCode 서버가 수요에 따라 동적으로 정합니다(공개 한도 없음).".to_string()),
-        ),
-        (_, p) => (
-            None,
-            None,
-            None,
-            if p.is_empty() { "요금제 미설정".into() } else { p.to_uppercase() },
-            Some("공개 한도 조회 API가 없어 앱이 기록한 사용량만 표시합니다.".to_string()),
         ),
     };
 
@@ -183,119 +142,6 @@ fn app_estimated(conn: &Connection, settings: &Settings, kind: Kind) -> Result<E
             make_win("30d", "최근 30일", tok_30d, usd_30d, cap_30d),
         ],
         message: note,
-        checked_at: crate::db::now(),
-    })
-}
-
-async fn probe_claude() -> Option<EngineQuota> {
-    let bin = engine::locate(Kind::Claude)?;
-    let mut cmd = engine::command_for(Kind::Claude, &bin);
-    cmd.args(["-p", "/usage", "--output-format", "stream-json", "--verbose"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(b"/usage\n").await;
-        drop(stdin);
-    }
-    let out = tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut windows = Vec::new();
-    for line in text.lines() {
-        let Ok(ev) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(limits) = ev["usage_report"]["rate_limits"]["limits"]
-            .as_array()
-            .or_else(|| ev["message"]["usage_report"]["rate_limits"]["limits"].as_array())
-        {
-            for item in limits {
-                let k = item["kind"].as_str().unwrap_or("5h").to_string();
-                let pct = item["percent"].as_f64();
-                let resets = item["resets_at"].as_str().map(String::from);
-                windows.push(QuotaWindow {
-                    label: if k == "5h" { "5시간 창".into() } else { format!("{k} 창") },
-                    kind: k,
-                    percent: pct,
-                    used_label: pct.map(|p| format!("{p:.0}% 사용")).unwrap_or_else(|| "확인됨".into()),
-                    resets_at: resets,
-                });
-            }
-        }
-    }
-    if windows.is_empty() {
-        Some(EngineQuota {
-            engine: "claude".into(),
-            label: Kind::Claude.label().into(),
-            plan: "Claude 구독".into(),
-            source: "estimated".into(),
-            windows: vec![],
-            message: Some("이 버전은 사용량 보고를 지원하지 않습니다.".into()),
-            checked_at: crate::db::now(),
-        })
-    } else {
-        Some(EngineQuota {
-            engine: "claude".into(),
-            label: Kind::Claude.label().into(),
-            plan: "Claude 구독".into(),
-            source: "cli".into(),
-            windows,
-            message: None,
-            checked_at: crate::db::now(),
-        })
-    }
-}
-
-async fn probe_agy() -> Option<EngineQuota> {
-    let bin = engine::locate(Kind::Agy)?;
-    let mut cmd = engine::command_for(Kind::Agy, &bin);
-    cmd.args(["-p", "/usage", "--output-format", "json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = tokio::time::timeout(std::time::Duration::from_secs(12), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let ev: Value = serde_json::from_str(text.trim()).ok()?;
-    let mut windows = Vec::new();
-    if let Some(groups) = ev["command"]["data"]["groups"].as_array() {
-        for g in groups {
-            if let Some(buckets) = g["buckets"].as_array() {
-                for b in buckets {
-                    let name = b["name"].as_str().unwrap_or("한도");
-                    let win = b["window"].as_str().unwrap_or("5h");
-                    let rem = b["remaining_fraction"].as_f64();
-                    let used_pct = rem.map(|r| ((1.0 - r).clamp(0.0, 1.0)) * 100.0);
-                    let resets = b["reset_time"].as_str().map(String::from);
-                    windows.push(QuotaWindow {
-                        kind: win.to_string(),
-                        label: format!("{name} ({win})"),
-                        percent: used_pct,
-                        used_label: used_pct
-                            .map(|p| format!("{p:.0}% 사용"))
-                            .unwrap_or_else(|| "확인됨".into()),
-                        resets_at: resets,
-                    });
-                }
-            }
-        }
-    }
-    if windows.is_empty() {
-        return None;
-    }
-    Some(EngineQuota {
-        engine: "agy".into(),
-        label: Kind::Agy.label().into(),
-        plan: "Antigravity 구독".into(),
-        source: "cli".into(),
-        windows,
-        message: None,
         checked_at: crate::db::now(),
     })
 }

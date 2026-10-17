@@ -153,8 +153,8 @@ export function DeliverableView({ task, result }: { task: Task; result: Delivera
               <button className="btn btn--ghost btn--sm" onClick={() => revealItemInDir(result.workspace!.repo)}>
                 <Icon name="folder" size={16} /> 저장소 열기
               </button>
-              <button className="btn btn--ghost btn--sm" onClick={() => api.openInAntigravity(result.workspace!.repo).catch((e) => toast(errorText(e), "error"))}>
-                <Icon name="external" size={16} /> Antigravity로 열기
+              <button className="btn btn--ghost btn--sm" onClick={() => api.openTerminal(result.workspace!.repo).catch((e) => toast(errorText(e), "error"))}>
+                <Icon name="terminal" size={16} /> 터미널 열기
               </button>
             </>
           )}

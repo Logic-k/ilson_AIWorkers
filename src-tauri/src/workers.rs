@@ -447,9 +447,9 @@ pub(crate) fn ai_request(ctx: &Ctx) -> Result<(String, u32, u32)> {
 
 // ───────────────────────── 실행 방식: 안전 모드 / 자동 모드 ─────────────────────────
 //
-// 안전 모드(기본): 앱은 agy를 실행하지 않는다. 직원을 Antigravity 사용자 정의 에이전트(.agents/agents/ilson-*.md)와
-// 업무 지시서(.ilson/TASK.md)로 준비해 두면 사장님이 Antigravity에서 실행하고, 앱은 보고서·상태 파일과 변경을 지켜본다.
-// 자동 모드(설정에서 동의 필요): 앱이 사장님 PC의 공식 agy를 헤드리스로 실행한다.
+// 안전 모드(기본): 앱은 OpenCode를 직접 실행하지 않는다. 직원을 OpenCode 에이전트 정의(.opencode/agents/ilson-*.md)와
+// 업무 지시서(.ilson/TASK.md)로 준비해 두면 사장님이 터미널에서 실행하고, 앱은 보고서·상태 파일과 변경을 지켜본다.
+// 자동 모드(설정에서 동의 필요): 앱이 사장님 PC의 OpenCode를 헤드리스로 직접 실행한다.
 
 pub fn is_safe(ctx: &Ctx) -> bool {
     ctx.input["_engine"] != "auto"
@@ -525,14 +525,14 @@ fn rules(allow_run: bool, safe: bool, actor: &str) -> String {
         "- 셸 명령은 실행하지 않는다. 테스트·빌드는 실행하지 말고, 사장님이 실행할 명령을 ‘확인 방법’에 적는다."
     };
     format!(
-        "규칙\n- 현재 디렉터리(작업 공간) 안의 파일만 읽고 고친다. `{PROGRESS_DIR}/`와 `.agents/` 폴더는 회사 관리용이니 결과물로 쓰지 않는다.\n- 기존 코드 스타일과 구조를 따르고, 요청과 관계없는 리팩터링은 하지 않는다.\n- git 명령(commit, push, branch, reset, checkout 등)은 실행하지 않는다. 커밋은 회사가 대신 한다.\n- 비밀번호·API 키 같은 비밀 값을 만들거나 코드에 넣지 않는다.\n{run}\n{}\n\n## 한 일\n## 바꾼 파일\n## 확인 방법\n## 남은 문제",
+        "규칙\n- 현재 디렉터리(작업 공간) 안의 파일만 읽고 고친다. `{PROGRESS_DIR}/`와 `.opencode/` 폴더는 회사 관리용이니 결과물로 쓰지 않는다.\n- 기존 코드 스타일과 구조를 따르고, 요청과 관계없는 리팩터링은 하지 않는다.\n- git 명령(commit, push, branch, reset, checkout 등)은 실행하지 않는다. 커밋은 회사가 대신 한다.\n- 비밀번호·API 키 같은 비밀 값을 만들거나 코드에 넣지 않는다.\n{run}\n{}\n\n## 한 일\n## 바꾼 파일\n## 확인 방법\n## 남은 문제",
         finish_rule(safe, actor, false)
     )
 }
 
 /// 사장님이 직접 실행할 때 팀원을 서브에이전트로 부를 수 있는 엔진인지.
 fn supports_subagents(kind: Kind) -> bool {
-    matches!(kind, Kind::Agy | Kind::Claude | Kind::Opencode)
+    kind == Kind::Opencode
 }
 
 fn plan_text(ctx: &Ctx) -> String {
@@ -750,61 +750,6 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
 
 // ───────────────────────── 안전 모드: 지시서 준비와 관찰 ─────────────────────────
 
-fn agent_tools(id: &str, edits: bool, lead: bool) -> Vec<&'static str> {
-    let mut tools = vec!["view_file", "list_dir", "find_by_name", "grep_search", "write_to_file"];
-    if roster::DEV_TEAM.contains(&id) {
-        if edits {
-            tools.extend(["replace_file_content", "multi_replace_file_content", "run_command"]);
-        }
-        if lead {
-            tools.push("invoke_subagent");
-        }
-    } else {
-        tools.extend(["search_web", "read_url_content"]);
-    }
-    tools
-}
-
-/// lead: 이번 업무를 이끄는 직원 (팀원을 서브에이전트로 부를 수 있다).
-fn agent_file(id: &str, team: &[String], lead: bool) -> String {
-    let e = roster::find(id).unwrap_or(Value::Null);
-    let edits = !matches!(id, "minhyuk") && roster::DEV_TEAM.contains(&id);
-    let lead = lead && team.len() > 1;
-    let tools = agent_tools(id, edits, lead).iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n");
-    let subagents: Vec<String> = team.iter().filter(|t| t.as_str() != id).map(|t| format!("ilson-{t}.md")).collect();
-    let agents = if lead && !subagents.is_empty() {
-        format!("agents:\n{}\n", subagents.iter().map(|a| format!("  - {a}")).collect::<Vec<_>>().join("\n"))
-    } else {
-        String::new()
-    };
-    let body = if roster::DEV_TEAM.contains(&id) {
-        rules(id != "daeun" && id != "minhyuk", true, id)
-    } else {
-        finish_rule(true, id, true)
-    };
-    format!(
-        "---\nname: ilson-{id}\ndescription: 일손의 {} {}. {}\ntools:\n{tools}\nmodel: inherit\nmainAgent: true\nsubagent: true\ncommandExecutionPolicy: sandbox\n{agents}---\n# System Prompt\n{}\n\n{body}\n",
-        e["role"].as_str().unwrap_or(""),
-        e["name"].as_str().unwrap_or(id),
-        e["summary"].as_str().unwrap_or(""),
-        persona(id)
-    )
-}
-
-/// Claude Code 서브에이전트 정의 (.claude/agents/ilson-*.md).
-fn claude_agent_file(id: &str) -> String {
-    let e = roster::find(id).unwrap_or(Value::Null);
-    let tools = if id == "minhyuk" || !roster::DEV_TEAM.contains(&id) { "Read, Grep, Glob, Write, WebSearch, WebFetch" } else { "Read, Grep, Glob, Write, Edit, MultiEdit, Bash" };
-    let body = if roster::DEV_TEAM.contains(&id) { rules(id != "daeun" && id != "minhyuk", true, id) } else { finish_rule(true, id, true) };
-    format!(
-        "---\nname: ilson-{id}\ndescription: 일손의 {} {}. {}\ntools: {tools}\nmodel: inherit\n---\n{}\n\n{body}\n",
-        e["role"].as_str().unwrap_or(""),
-        e["name"].as_str().unwrap_or(id),
-        e["summary"].as_str().unwrap_or(""),
-        persona(id)
-    )
-}
-
 /// OpenCode 에이전트 정의 (.opencode/agents/ilson-*.md).
 fn opencode_agent_file(id: &str, team: &[String], lead: bool, model: &str, allow_run: bool) -> String {
     let e = roster::find(id).unwrap_or(Value::Null);
@@ -842,40 +787,21 @@ fn prepare_handoff(ctx: &Ctx, job: &AiJob) -> Result<()> {
     if !team.contains(&job.actor) {
         team.insert(0, job.actor.clone());
     }
-    match job.engine {
-        Kind::Agy => {
-            let agents_dir = job.cwd.join(".agents").join("agents");
-            std::fs::create_dir_all(&agents_dir)?;
-            for id in &team {
-                std::fs::write(agents_dir.join(format!("ilson-{id}.md")), agent_file(id, &team, *id == job.actor))?;
-            }
-        }
-        Kind::Claude if team.len() > 1 => {
-            let agents_dir = job.cwd.join(".claude").join("agents");
-            std::fs::create_dir_all(&agents_dir)?;
-            for id in team.iter().filter(|t| **t != job.actor) {
-                std::fs::write(agents_dir.join(format!("ilson-{id}.md")), claude_agent_file(id))?;
-            }
-        }
-        Kind::Opencode => {
-            let agents_dir = job.cwd.join(".opencode").join("agents");
-            std::fs::create_dir_all(&agents_dir)?;
-            let model = ctx
-                .settings
-                .model_for(Kind::Opencode)
-                .unwrap_or_else(|| engine::OPENCODE_DEFAULT_MODEL.to_string());
-            let allow_run = ctx.b("allowRun", false);
-            for id in &team {
-                std::fs::write(
-                    agents_dir.join(format!("ilson-{id}.md")),
-                    opencode_agent_file(id, &team, *id == job.actor, &model, allow_run),
-                )?;
-            }
-        }
-        _ => {}
+    let agents_dir = job.cwd.join(".opencode").join("agents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let model = ctx
+        .settings
+        .model_for(Kind::Opencode)
+        .unwrap_or_else(|| engine::OPENCODE_DEFAULT_MODEL.to_string());
+    let allow_run = ctx.b("allowRun", false);
+    for id in &team {
+        std::fs::write(
+            agents_dir.join(format!("ilson-{id}.md")),
+            opencode_agent_file(id, &team, *id == job.actor, &model, allow_run),
+        )?;
     }
     let mut prompt = job.prompt.clone();
-    if job.engine == Kind::Opencode && team.len() > 1 {
+    if team.len() > 1 {
         prompt.push_str("\n\n팀원은 `@ilson-<id>`로 부른다.");
     }
     std::fs::write(progress.join("TASK.md"), &prompt)?;
@@ -898,24 +824,12 @@ fn handoff_gate(ctx: &Ctx, key: &str) -> Result<Option<Gate>> {
     let agent = format!("ilson-{}", job.actor);
     let name = name_of(&job.actor);
     let kind = job.engine;
-    let say = if kind == Kind::Agy { format!("{agent} 에이전트로 {START_LINE}") } else { START_LINE.to_string() };
-    let mut details = if kind == Kind::Agy {
-        vec![
-            "1. ‘Antigravity 열기’로 작업 폴더를 엽니다 (터미널을 쓴다면 ‘터미널 명령 복사’).".to_string(),
-            format!("2. 에이전트에게 이렇게 말합니다: “{say}”"),
-        ]
-    } else if kind == Kind::Opencode {
-        vec![
-            "1. ‘터미널 열기’ → ‘터미널 명령 복사’(OpenCode 화면이 열리고 지시가 자동 입력됩니다).".to_string(),
-            "2. OpenCode 터미널에 복사한 명령을 붙여 넣고 엔터를 누릅니다.".to_string(),
-        ]
-    } else {
-        vec![
-            format!("1. ‘터미널 열기’로 작업 폴더에서 터미널을 엽니다."),
-            format!("2. ‘터미널 명령 복사’로 {}을 실행하는 명령을 붙여 넣습니다.", kind.label()),
-        ]
-    };
-    details.push("3. 끝나면 앱이 보고서를 확인하고 자동으로 다음 단계로 넘어갑니다.".into());
+    let say = START_LINE.to_string();
+    let mut details = vec![
+        "1. ‘터미널 열기’ → ‘터미널 명령 복사’(OpenCode 화면이 열리고 지시가 자동 입력됩니다).".to_string(),
+        "2. OpenCode 터미널에 복사한 명령을 붙여 넣고 엔터를 누릅니다.".to_string(),
+        "3. 끝나면 앱이 보고서를 확인하고 자동으로 다음 단계로 넘어갑니다.".to_string(),
+    ];
     if job.team.len() > 1 {
         let others: Vec<String> = job.team.iter().filter(|t| **t != job.actor).map(|t| name_of(t)).collect();
         details.push(format!("{name}가 {}에게 서브에이전트로 일을 나눠 맡깁니다.", others.join(", ")));
@@ -941,7 +855,7 @@ fn mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-/// 안전 모드: 사장님이 Antigravity에서 실행한 일을 지켜보다가 보고서가 생기면 돌아온다.
+/// 안전 모드: 사장님이 OpenCode에서 실행한 일을 지켜보다가 보고서가 생기면 돌아온다.
 async fn watch_external(ctx: &Ctx, job: &AiJob) -> Result<(String, String)> {
     let progress = job.cwd.join(PROGRESS_DIR);
     let report = progress.join(format!("report-{}.md", job.actor));
@@ -1485,7 +1399,7 @@ fn deliver(ctx: &Ctx) -> Result<StepResult> {
                 .map(|p| json!({ "title": p["title"], "url": p["url"] }))
                 .collect();
             md.push_str(&sources_markdown(&sources));
-            let model_name = ai["model"].as_str().unwrap_or("Antigravity").to_string();
+            let model_name = ai["model"].as_str().unwrap_or("OpenCode").to_string();
             let mut meta = vec![json!({ "label": "모델", "value": model_name })];
             match emp {
                 "harin" => {

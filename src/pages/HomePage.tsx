@@ -95,7 +95,7 @@ export function HomePage() {
             )}
           </h2>
           <p>
-            API 키 없이 사장님 구독(Antigravity·Claude Code·Codex·OpenCode)으로 일합니다. 코드 병합과 파일 이동은 항상 사장님 확인을 받은 뒤에 진행합니다.
+            API 키 없이 OpenCode(DeepSeek Flash 무료) 엔진으로 일합니다. 코드 병합과 파일 이동은 항상 사장님 확인을 받은 뒤에 진행합니다.
             {summary && summary.yesterdayTasks > 0 && (
               <span style={{ display: "block", marginTop: 4, color: "var(--brand)" }}>
                 어제 완료: {summary.yesterdayTasks}건 · {fmtTokens(summary.yesterdayTokens)} 토큰

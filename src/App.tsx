@@ -16,7 +16,7 @@ const nav: { id: Route; label: string; description: string; icon: string }[] = [
   { id: "employees", label: "AI 직원", description: "직원 소개와 업무 맡기기", icon: "people" },
   { id: "work", label: "업무", description: "전체 업무와 결과물", icon: "work" },
   { id: "usage", label: "사용량·예산", description: "토큰 사용량, 환산 비용, 구독 한도 및 일일 예산", icon: "gauge" },
-  { id: "connections", label: "연결 및 설정", description: "Antigravity 연결, 실행 방식, 사업장 정보", icon: "link" },
+  { id: "connections", label: "연결 및 설정", description: "OpenCode 연결, 실행 방식, 사업장 정보", icon: "link" },
   { id: "help", label: "도움말", description: "일하는 방식과 자주 묻는 질문", icon: "help" },
 ];
 
@@ -60,7 +60,7 @@ function Shell() {
               <i /> {running}건 처리 중
             </p>
           )}
-          <small>v{boot?.version ?? ""} · API 키 없이 구독으로</small>
+          <small>v{boot?.version ?? ""} · OpenCode 자동화</small>
         </div>
       </aside>
       <main className="main">

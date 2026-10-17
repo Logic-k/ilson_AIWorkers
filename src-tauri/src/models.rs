@@ -38,7 +38,7 @@ pub struct Gate {
     pub command: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
-    /// 이 단계를 실행할 엔진 (agy, claude, codex, kiro)
+    /// 이 단계를 실행할 엔진 (opencode)
     #[serde(default)]
     pub engine: Option<String>,
 }
@@ -109,15 +109,15 @@ pub struct Budgets {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// Antigravity 모델 ID. 비우면 agy 기본값 (자동 모드에서만 쓰임).
+    /// 기본 모델 ID. 비우면 OpenCode 기본값 (자동 모드에서만 쓰임).
     pub model: String,
-    /// "safe"(기본: 사장님이 Antigravity에서 실행) 또는 "auto"(앱이 agy를 직접 실행)
+    /// "safe"(기본: 사장님이 OpenCode에서 실행) 또는 "auto"(앱이 OpenCode를 직접 실행)
     pub engine_mode: String,
-    /// (이전 버전) Antigravity 자동 모드 동의 시각
+    /// (이전 버전 호환용) 자동 모드 동의 시각
     pub auto_ack_at: Option<String>,
-    /// 엔진별 자동 실행 위험 안내 동의 시각 (agy, claude, codex, opencode)
+    /// 엔진별 자동 실행 위험 안내 동의 시각 (opencode)
     pub auto_acks: HashMap<String, String>,
-    /// 직원별 담당 구독 엔진 (예: taeo → claude)
+    /// 직원별 담당 구독 엔진 (예: taeo → opencode)
     pub assignments: HashMap<String, String>,
     /// 엔진별 모델 (비우면 각 CLI 기본값)
     pub models: HashMap<String, String>,
@@ -127,7 +127,7 @@ pub struct Settings {
     pub usd_krw: f64,
     /// 마지막 환율 갱신 시각
     pub fx_updated_at: Option<String>,
-    /// 엔진별 구독 요금제 (agy: pro|ultra5|ultra20, claude: pro|max5|max20, codex: plus|pro, opencode: free|go|go_plus)
+    /// 엔진별 구독 요금제
     pub plans: HashMap<String, String>,
     /// 일일 토큰·원화 예산 상한
     pub budgets: Budgets,
@@ -146,16 +146,16 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// 직원이 쓰는 구독 엔진. 정하지 않았으면 Antigravity.
+    /// 직원이 쓰는 구독 엔진.
     pub fn engine_for(&self, employee: &str) -> Kind {
-        Kind::from_id(self.assignments.get(employee).map(String::as_str).unwrap_or("agy"))
+        Kind::from_id(self.assignments.get(employee).map(String::as_str).unwrap_or("opencode"))
     }
 
     /// 이 엔진을 앱이 직접 실행해도 되는지: 자동 모드 + 엔진별 위험 안내 동의.
     pub fn auto_ok(&self, kind: Kind) -> bool {
         self.engine_mode == "auto"
             && kind.can_auto()
-            && (self.auto_acks.contains_key(kind.id()) || (kind == Kind::Agy && self.auto_ack_at.is_some()))
+            && (self.auto_acks.contains_key(kind.id()) || self.auto_ack_at.is_some())
     }
 
     /// 업무 단위 자동 모드: 동의한 엔진이 하나라도 있으면 단계별로 나눠 진행한다.
@@ -164,7 +164,7 @@ impl Settings {
     }
 
     pub fn model_for(&self, kind: Kind) -> Option<String> {
-        let m = self.models.get(kind.id()).cloned().unwrap_or_else(|| if kind == Kind::Agy { self.model.clone() } else { String::new() });
+        let m = self.models.get(kind.id()).cloned().unwrap_or_else(|| self.model.clone());
         let trimmed = m.trim();
         if !trimmed.is_empty() {
             Some(trimmed.to_string())

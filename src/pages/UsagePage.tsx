@@ -193,8 +193,8 @@ export function UsagePage() {
       <section className="card">
         <header className="card__head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
-            <h3>구독 엔진별 사용량 한도 (쿼터)</h3>
-            <p>Claude Code, Codex, OpenCode, Agy의 공식 한도 및 추정치입니다.</p>
+            <h3>엔진 사용량 한도 (쿼터)</h3>
+            <p>OpenCode 엔진의 사용량 및 토큰 사용 현황입니다.</p>
           </div>
           <button
             className="btn btn--ghost btn--sm"

@@ -169,15 +169,9 @@ function TaskDetail({ id }: { id: string }) {
             ))}
           </ol>
           <div className="handoff-tools">
-            {(gate.engine ?? "agy") === "agy" ? (
-              <button className="btn btn--sm" disabled={!gate.folder} onClick={() => gate.folder && act(() => api.openInAntigravity(gate.folder!), "Antigravity를 열었습니다.")}>
-                <Icon name="external" size={14} /> Antigravity 열기
-              </button>
-            ) : (
-              <button className="btn btn--sm" disabled={!gate.folder} onClick={() => gate.folder && act(() => api.openTerminal(gate.folder!), "작업 폴더에서 터미널을 열었습니다.")}>
-                <Icon name="external" size={14} /> 터미널 열기
-              </button>
-            )}
+            <button className="btn btn--sm" disabled={!gate.folder} onClick={() => gate.folder && act(() => api.openTerminal(gate.folder!), "작업 폴더에서 터미널을 열었습니다.")}>
+              <Icon name="terminal" size={14} /> 터미널 열기
+            </button>
             {gate.prompt && (
               <button className="btn btn--ghost btn--sm" onClick={() => copy(gate.prompt!, "에이전트에게 할 말을 복사했습니다.")}>
                 <Icon name="copy" size={14} /> 할 말 복사
@@ -222,8 +216,8 @@ function TaskDetail({ id }: { id: string }) {
               </button>
               {gate.folder && (
                 <>
-                  <button className="btn btn--ghost btn--sm" onClick={() => act(() => api.openInAntigravity(gate.folder!))}>
-                    <Icon name="external" size={14} /> Antigravity로 열기
+                  <button className="btn btn--ghost btn--sm" onClick={() => act(() => api.openTerminal(gate.folder!), "작업 폴더에서 터미널을 열었습니다.")}>
+                    <Icon name="terminal" size={14} /> 터미널 열기
                   </button>
                   <button className="btn btn--ghost btn--sm" onClick={() => revealItemInDir(gate.folder!)}>
                     <Icon name="folder" size={14} /> 작업 폴더 열기

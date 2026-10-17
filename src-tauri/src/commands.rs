@@ -23,7 +23,7 @@ fn availability(conn: &rusqlite::Connection, employee: &Value, settings: &Settin
     let mut missing: Vec<String> = vec![];
     for req in roster::requirements(id) {
         match *req {
-            "agy" if !engine_ready => missing.push(engine_need.clone()),
+            "opencode" if !engine_ready => missing.push(engine_need.clone()),
             "business" if settings.business_name.trim().is_empty() => missing.push("사업장 상호".into()),
             _ => {}
         }
@@ -50,7 +50,7 @@ pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value>
         .map(|mut e| {
             let id = e["id"].as_str().unwrap_or("").to_string();
             e["availability"] = availability(&conn, &e, &settings, &engines, &tasks);
-            if roster::requirements(&id).contains(&"agy") {
+            if roster::requirements(&id).contains(&"opencode") {
                 let kind = settings.engine_for(&id);
                 let model = settings.model_for(kind).unwrap_or_else(|| crate::pricing::default_model_for(kind.id()).to_string());
                 let free = crate::pricing::resolve(kind.id(), Some(&model)).map(|p| p.list_cost_zero).unwrap_or(false);
@@ -293,14 +293,12 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdResul
 
 /// 모든 구독 엔진의 설치·로그인 상태를 함께 확인한다 (사용량을 쓰지 않는다).
 pub async fn check_engines() -> Engines {
-    let (a, b, c, d, e) = tokio::join!(
-        engine::status(engine::Kind::Agy),
-        engine::status(engine::Kind::Claude),
-        engine::status(engine::Kind::Codex),
-        engine::status(engine::Kind::Opencode),
-        engine::status(engine::Kind::Kiro)
-    );
-    [a, b, c, d, e].into_iter().map(|s| (s.id.clone(), s)).collect()
+    let mut map = HashMap::new();
+    for k in engine::ALL {
+        let st = engine::status(k).await;
+        map.insert(st.id.clone(), st);
+    }
+    map
 }
 
 #[tauri::command]
@@ -366,11 +364,6 @@ pub fn discard_task(app: AppHandle, state: State<'_, AppState>, id: String) -> C
     Ok(())
 }
 
-/// 안전 모드: Antigravity IDE를 작업 폴더로 연다. (앱은 agy를 실행하지 않는다)
-#[tauri::command]
-pub fn open_in_antigravity(folder: String) -> CmdResult<()> {
-    engine::open_ide(&folder).map_err(err)
-}
 
 /// 안전 모드: 보고서 파일이 없어도 이 단계를 끝난 것으로 처리한다.
 #[tauri::command]

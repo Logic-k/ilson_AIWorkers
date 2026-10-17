@@ -28,7 +28,7 @@ pub struct AppState {
     pub engines: Mutex<HashMap<String, engine::EngineStatus>>,
     /// 직원별 지금 하는 일 (사무실 화면).
     pub activities: Mutex<HashMap<String, serde_json::Value>>,
-    /// 자동 모드: 한 번에 한 업무만 agy를 실행한다.
+    /// 자동 모드: 한 번에 한 업무만 OpenCode를 실행한다.
     pub engine_lock: tokio::sync::Mutex<()>,
     /// 안전 모드: 사장님이 ‘완료 처리’를 누른 업무.
     pub external_done: Mutex<HashSet<String>>,
@@ -85,7 +85,6 @@ pub fn run() {
             commands::task_diff,
             commands::discard_task,
             commands::task_workspace_path,
-            commands::open_in_antigravity,
             commands::open_terminal,
             commands::finish_external,
             commands::acknowledge_guard,

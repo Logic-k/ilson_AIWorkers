@@ -27,7 +27,7 @@ pub const DEV_TEAM: &[&str] = &["taeo", "yuna", "geonwoo", "sohee", "minhyuk", "
 
 pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
     match employee_id {
-        // 안전 모드: 사장님이 Antigravity에서 한 번 실행하면 태오가 팀원을 서브에이전트로 부른다.
+        // 안전 모드: 사장님이 OpenCode 터미널에서 실행하면 태오가 팀원을 서브에이전트로 부른다.
         "taeo" if safe => vec![
             step("setup", "작업 공간 준비", None),
             step("team", "팀 개발 (직접 실행)", None),
@@ -115,12 +115,12 @@ pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
     }
 }
 
-/// 실행 전 필요한 준비물. "agy" = Antigravity 로그인, "business" = 사업장 상호.
+/// 실행 전 필요한 준비물. "opencode" = OpenCode 준비, "business" = 사업장 상호.
 pub fn requirements(employee_id: &str) -> &'static [&'static str] {
     match employee_id {
         "doyun" => &["business"],
         "sua" => &[],
-        _ => &["agy"],
+        _ => &["opencode"],
     }
 }
 
@@ -133,7 +133,7 @@ fn web_search_field(default: &str, label: &str) -> Value {
             { "value": "6", "label": "꼼꼼하게 · 검색 최대 6회" },
             { "value": "10", "label": "깊게 · 검색 최대 10회" }
         ],
-        "hint": "Antigravity가 직접 웹을 검색하고 출처를 붙입니다. 구독 범위 안에서 실행됩니다."
+        "hint": "OpenCode가 직접 웹을 검색하고 출처를 붙입니다."
     })
 }
 
@@ -506,7 +506,7 @@ fn folder_field() -> Value {
 fn permission_section(allow_run: bool) -> Value {
     let mut fields = vec![];
     if allow_run {
-        fields.push(json!({ "id": "allowRun", "kind": "checkbox", "label": "테스트·빌드 명령 실행 허용 (Antigravity 샌드박스 안에서)", "default": true }));
+        fields.push(json!({ "id": "allowRun", "kind": "checkbox", "label": "테스트·빌드 명령 실행 허용 (OpenCode 안에서)", "default": true }));
     }
     fields.push(json!({ "id": "allowInit", "kind": "checkbox", "label": "git 저장소가 아니면 새로 만들어 시작", "default": true }));
     json!({ "title": "실행 권한", "advanced": true, "fields": fields })
@@ -687,7 +687,7 @@ fn steps_json(safe: bool, id: &str) -> Value {
     )
 }
 
-/// AI가 하는 단계인지 (안전 모드에서는 사장님이 Antigravity에서 실행한다).
+/// AI가 하는 단계인지 (안전 모드에서는 사장님이 OpenCode에서 실행한다).
 pub fn is_ai_step(employee_id: &str, key: &str) -> bool {
     match employee_id {
         "harin" | "jiho" => key == "write",

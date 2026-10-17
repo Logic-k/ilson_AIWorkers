@@ -77,7 +77,7 @@ export interface Employee {
   engine?: { id: EngineId; label: string; auto: boolean; model?: string; free?: boolean };
 }
 
-export type EngineId = "agy" | "claude" | "codex" | "opencode" | "kiro";
+export type EngineId = "opencode";
 
 export interface Gate {
   kind: "apply" | "merge" | "handoff";
@@ -448,7 +448,6 @@ export const api = {
   taskDiff: (id: string) => invoke<DiffSummary>("task_diff", { id }),
   discardTask: (id: string) => invoke<void>("discard_task", { id }),
   taskWorkspacePath: (id: string) => invoke<string>("task_workspace_path", { id }),
-  openInAntigravity: (folder: string) => invoke<void>("open_in_antigravity", { folder }),
   finishExternal: (id: string) => invoke<void>("finish_external", { id }),
   acknowledgeGuard: (employeeId: string) => invoke<void>("acknowledge_guard", { employeeId }),
   saveTextFile: (path: string, contents: string) => invoke<void>("save_text_file", { path, contents }),
@@ -507,12 +506,8 @@ export const modeLabel: Record<Mode, string> = {
   local: "이 PC",
 };
 
-export const engineShort: Record<EngineId, string> = { agy: "AG", claude: "CC", codex: "CX", opencode: "OC", kiro: "KR" };
-export const engineHue: Record<EngineId, number> = { agy: 210, claude: 22, codex: 160, opencode: 100, kiro: 275 };
+export const engineShort: Record<EngineId, string> = { opencode: "OC" };
+export const engineHue: Record<EngineId, number> = { opencode: 100 };
 export const engineName: Record<EngineId, string> = {
-  agy: "Antigravity",
-  claude: "Claude Code",
-  codex: "Codex",
   opencode: "OpenCode",
-  kiro: "Kiro",
 };

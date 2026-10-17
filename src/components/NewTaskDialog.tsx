@@ -195,7 +195,7 @@ function TaskFormView({ employee, prefill, onBack }: { employee: Employee; prefi
             : employee.id === "sua"
               ? "파일을 옮기기 전에 계획을 보여 주고, 제가 확인한 뒤에만 옮깁니다."
               : "입력한 내용으로 업무를 맡깁니다."}
-          {handoff && " AI 단계는 안전 모드라 제가 Antigravity에서 직접 실행합니다(앱이 지시서를 준비합니다)."}
+          {handoff && " AI 단계는 안전 모드라 제가 OpenCode에서 직접 실행합니다(앱이 지시서를 준비합니다)."}
         </span>
       </label>
     </div>

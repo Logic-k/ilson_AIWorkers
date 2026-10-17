@@ -38,6 +38,7 @@ const iconMap: Record<string, LucideIcon> = {
   coins: LucideIcons.Coins,
   cpu: LucideIcons.Cpu,
   shield: LucideIcons.ShieldAlert,
+  terminal: LucideIcons.Terminal,
 };
 
 export function Icon({ name, size = 18 }: { name: string; size?: number }) {

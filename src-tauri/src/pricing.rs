@@ -4,10 +4,7 @@ use std::sync::OnceLock;
 
 const RAW_PRICES: &str = include_str!("../resources/prices.json");
 
-/// codex-cli 0.159.1+ 기본 모델
-pub const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
-pub const CLAUDE_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
-pub const AGY_DEFAULT_MODEL: &str = "gemini-3.8-flash";
+
 
 #[derive(Debug, Clone, Deserialize)]
 struct PriceFile {
@@ -74,13 +71,8 @@ pub fn source() -> &'static str {
     &table().source
 }
 
-pub fn default_model_for(engine: &str) -> &'static str {
-    match engine {
-        "claude" => CLAUDE_DEFAULT_MODEL,
-        "codex" => CODEX_DEFAULT_MODEL,
-        "opencode" => crate::engine::OPENCODE_DEFAULT_MODEL,
-        _ => AGY_DEFAULT_MODEL,
-    }
+pub fn default_model_for(_engine: &str) -> &'static str {
+    crate::engine::OPENCODE_DEFAULT_MODEL
 }
 
 fn strip_effort_suffix(s: &str) -> &str {
@@ -106,43 +98,8 @@ pub fn resolve(engine: &str, model_id: Option<&str>) -> Option<Price> {
         return Some(found);
     }
 
-    // 2. 엔진별 정규화
+    // 2. OpenCode 모델 정규화
     match engine {
-        "claude" => {
-            let clean = strip_effort_suffix(&low);
-            if let Some(p) = lookup_key(t, &format!("anthropic/{clean}")) {
-                return Some(p);
-            }
-            if clean == "opus" || clean.contains("opus") {
-                return lookup_key(t, "anthropic/claude-opus-5-5");
-            }
-            if clean == "haiku" || clean.contains("haiku") {
-                return lookup_key(t, "anthropic/claude-haiku-5-5");
-            }
-            if clean == "sonnet" || clean.contains("sonnet") {
-                return lookup_key(t, "anthropic/claude-sonnet-5-5");
-            }
-            lookup_key(t, "anthropic/claude-sonnet-5-5")
-        }
-        "codex" => {
-            let without_prov = low.strip_prefix("openai/").unwrap_or(&low);
-            let clean = strip_effort_suffix(without_prov);
-            if let Some(p) = lookup_key(t, &format!("openai/{clean}")) {
-                return Some(p);
-            }
-            lookup_key(t, &format!("openai/{CODEX_DEFAULT_MODEL}"))
-        }
-        "agy" => {
-            let without_prov = low.strip_prefix("google/").unwrap_or(&low);
-            let clean = strip_effort_suffix(without_prov);
-            if let Some(p) = lookup_key(t, &format!("google/{clean}")) {
-                return Some(p);
-            }
-            if clean.contains("argon") || clean.contains("pro") {
-                return lookup_key(t, "google/gemini-4-argon");
-            }
-            lookup_key(t, "google/gemini-3.8-flash")
-        }
         "opencode" => {
             let is_free = low.ends_with("-free");
             let without_prov = low
@@ -172,10 +129,10 @@ pub fn resolve(engine: &str, model_id: Option<&str>) -> Option<Price> {
                 }
             }
             lookup_key(t, &format!("opencode/{clean}"))
-                .or_else(|| lookup_key(t, &format!("deepseek/{clean}"))
-                .or_else(|| lookup_key(t, "opencode/deepseek-v4.1-flash-free")))
+                .or_else(|| lookup_key(t, &format!("deepseek/{clean}")))
+                .or_else(|| lookup_key(t, "opencode/deepseek-v4.1-flash-free"))
         }
-        _ => lookup_key(t, "google/gemini-3.8-flash"),
+        _ => lookup_key(t, "opencode/deepseek-v4.1-flash-free"),
     }
 }
 
@@ -232,19 +189,7 @@ mod tests {
 
     #[test]
     fn pricing_cost_matches_hand_calculation_within_one_cent() {
-        // 1. Claude Opus 5.5: input $4/M, cache_read $0.20/M, cache_write $5/M, output $20/M
-        // 50,000 input ($0.20) + 100,000 cache_read ($0.02) + 10,000 cache_write ($0.05) + 5,000 output ($0.10) = $0.37
-        let opus = resolve("claude", Some("claude-opus-5-5")).expect("opus price");
-        let c1 = cost(&opus, 50_000, 100_000, 10_000, 5_000);
-        assert!((c1 - 0.37).abs() < 0.01, "expected ~0.37, got {c1}");
-
-        // 2. GPT-6.1 Sol: input $2/M, cache_read $0.10/M, cache_write $2/M, output $10/M
-        // 100,000 input ($0.20) + 200,000 cache_read ($0.02) + 0 cache_write + 15,000 output ($0.15) = $0.37
-        let codex = resolve("codex", None).expect("codex default price");
-        let c2 = cost(&codex, 100_000, 200_000, 0, 15_000);
-        assert!((c2 - 0.37).abs() < 0.01, "expected ~0.37, got {c2}");
-
-        // 3. OpenCode DeepSeek V4.1 Flash (free uses sibling $0.30/M in, $0.006/M cache_read, $1.20/M out)
+        // OpenCode DeepSeek V4.1 Flash (free uses sibling $0.30/M in, $0.006/M cache_read, $1.20/M out)
         // 200,000 input ($0.06) + 500,000 cache_read ($0.003) + 0 + 25,000 output ($0.03) = $0.093
         let ds = resolve("opencode", Some("opencode/deepseek-v4.1-flash-free")).expect("ds price");
         assert!(ds.list_cost_zero);
@@ -254,14 +199,6 @@ mod tests {
 
     #[test]
     fn pricing_resolve_normalizes_aliases_suffixes_and_free() {
-        let alias = resolve("claude", Some("opus")).unwrap();
-        assert_eq!(alias.model_key, "anthropic/claude-opus-5-5");
-        assert!((alias.input - 4.0).abs() < 1e-6);
-
-        let agy_high = resolve("agy", Some("gemini-3.8-flash-high")).unwrap();
-        assert_eq!(agy_high.model_key, "google/gemini-3.8-flash");
-        assert!((agy_high.input - 0.75).abs() < 1e-6);
-
         let free_model = resolve("opencode", Some("opencode/deepseek-v4.1-flash-free")).unwrap();
         assert!(free_model.list_cost_zero);
         assert!((free_model.input - 0.30).abs() < 1e-6);

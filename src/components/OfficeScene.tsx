@@ -186,13 +186,13 @@ export function OfficeScene({ employees, tasks, activities, selected, onSelect, 
           goal = { floor: 1, x: SPOTS.boss.x - 46 - qIdx * 40 };
           key = `boss:${qIdx}`;
           const g = approvals[qIdx].pendingGate;
-          view = { pose: "waiting", chip: { text: "!", tone: "wait" }, bubble: g?.kind === "merge" ? "병합 확인 부탁드려요" : g?.kind === "handoff" ? "Antigravity에서 불러 주세요" : "확인 부탁드려요" };
+          view = { pose: "waiting", chip: { text: "!", tone: "wait" }, bubble: g?.kind === "merge" ? "병합 확인 부탁드려요" : g?.kind === "handoff" ? "OpenCode에서 불러 주세요" : "확인 부탁드려요" };
         } else if (meeting.has(e.id)) {
           goal = { floor: 1, x: SPOTS.meeting.x - 60 + meetIdx++ * 60 };
           key = `meeting:${meetIdx}`;
           view = { pose: "meeting", chip: { text: "회의", tone: "work" }, bubble: e.id === "taeo" ? "구조부터 정할게요" : undefined };
-        } else if (running && act && act.taskId === running.id && act.label.startsWith("Antigravity에서 시작")) {
-          view = { pose: "idle", chip: { text: "▶ 대기", tone: "idle" }, bubble: "Antigravity에서 불러 주세요" };
+        } else if (running && act && act.taskId === running.id && (act.label.includes("시작하길 기다리는 중") || act.label.startsWith("OpenCode에서 시작"))) {
+          view = { pose: "idle", chip: { text: "▶ 대기", tone: "idle" }, bubble: "OpenCode에서 불러 주세요" };
         } else if (running) {
           const kind = act && act.taskId === running.id ? act.kind : "thinking";
           const pose: Pose = kind === "typing" ? "typing" : kind === "running" ? "running" : kind === "reading" ? "reading" : "typing";
