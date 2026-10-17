@@ -153,7 +153,7 @@ export function OfficeScene({ employees, tasks, activities, selected, onSelect, 
       const approvals = tasks.filter((t) => t.status === "awaiting_approval").sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
       const meeting = new Set<string>();
       for (const t of tasks) {
-        if (t.status === "running" && t.employeeId === "taeo" && t.currentActor === "taeo" && t.currentStep === "기획·설계") {
+        if (t.status === "running" && t.employeeId === "taeo" && t.currentActor === "taeo" && t.currentStep?.includes("기획·설계")) {
           meeting.add("taeo");
           const devs = String(t.input.devs ?? "both");
           if (devs !== "backend") meeting.add("yuna");

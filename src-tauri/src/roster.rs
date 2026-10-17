@@ -76,16 +76,18 @@ pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
             step("analyze", "자격 점검", None),
             step("deliver", "결과 정리", None),
         ],
-        // 개발팀: 팀 프로젝트(테크 리드가 맡아 팀원에게 나눔)
+        // 개발팀: 전사 합동 자율 제작 파이프라인 (리서치 -> 기획·설계 -> 코어·화면 개발 -> QA·리뷰 -> 보완 -> 착수 가이드 -> 완료)
         "taeo" => vec![
-            step("setup", "작업 공간 준비", None),
-            step("plan", "기획·설계", None),
-            by("frontend", "화면 개발", "yuna"),
-            by("backend", "서버·로직 개발", "geonwoo"),
-            by("test", "테스트", "sohee"),
-            by("review", "코드 리뷰", "minhyuk"),
-            step("fix", "리뷰 반영", None),
-            step("merge", "병합", Some("merge")),
+            step("setup", "프로젝트 착수·준비", None),
+            by("research", "도메인·UX 리서치", "seojin"),
+            step("plan", "프로그램 기획·설계", None),
+            by("backend", "코어·로직 개발", "geonwoo"),
+            by("frontend", "화면·UI 개발", "yuna"),
+            by("test", "QA·테스트 검증", "sohee"),
+            by("review", "코드·품질 리뷰", "minhyuk"),
+            step("fix", "리뷰 반영·보완", None),
+            by("docs", "착수 가이드·문서화", "daeun"),
+            step("merge", "병합·착수 완료", Some("merge")),
             step("deliver", "결과 보고", None),
         ],
         "yuna" | "geonwoo" => vec![
@@ -503,6 +505,13 @@ fn folder_field() -> Value {
     })
 }
 
+fn optional_folder_field() -> Value {
+    json!({
+        "id": "folder", "kind": "folder", "label": "작업 폴더 (비워 두면 새 프로젝트 폴더 자동 생성)", "required": false,
+        "hint": "비워 두면 ‘내 문서/일손_프로젝트’ 아래에 새 폴더와 git 저장소를 자동으로 만들어 시작합니다. 기존 프로젝트를 수정하려면 폴더를 골라 주세요."
+    })
+}
+
 fn permission_section(allow_run: bool) -> Value {
     let mut fields = vec![];
     if allow_run {
@@ -526,13 +535,13 @@ fn dev_team(safe: bool) -> Vec<Value> {
     vec![
         json!({
             "id": "taeo", "name": "태오", "role": "테크 리드", "team": "개발팀", "mode": "ai_local", "hue": 185,
-            "summary": "만들고 싶은 기능을 받아 설계하고, 팀원에게 나눠 맡긴 뒤 테스트와 리뷰를 거친 변경을 병합 대기로 올립니다.",
+            "summary": "만들고 싶은 프로그램이나 기능을 말하면 서진의 도메인·UX 리서치부터 기획·설계, 건우·유나의 개발, 소희의 QA 테스트, 민혁의 리뷰, 다은의 착수 가이드까지 전 과정을 지휘합니다.",
             "motto": "작게 나누면, 끝까지 갑니다.",
-            "capabilities": ["요구사항 정리", "작업 분해·설계", "팀원 배정", "결과 보고"],
-            "inputSummary": "작업 폴더, 만들고 싶은 기능",
-            "outputSummary": "설계서와 팀이 만든 변경(병합 대기), 리뷰 의견",
+            "capabilities": ["리서치·요구사항 정의", "프로그램 기획·설계(PRD)", "코어·화면 팀원 배정", "QA·리뷰·착수 가이드"],
+            "inputSummary": "만들고 싶은 프로그램·기능 (작업 폴더 생략 시 자동 생성)",
+            "outputSummary": "리서치·설계서, 완성된 프로그램 코드, QA·리뷰 보고서, 착수 안내서",
             "costSummary": "구독 포함 · API 키·추가 요금 없음",
-            "notice": "팀은 별도 작업 공간에서 일하고, 사장님이 변경을 확인해 ‘병합’을 눌러야만 원래 저장소에 반영됩니다.",
+            "notice": "폴더를 비워 두면 새 프로젝트 폴더를 자동으로 만들어 끝까지 완성합니다. 기존 저장소를 지정하면 별도 작업 공간에서 일한 뒤 병합 확인을 받습니다.",
             "resume": dev_resume("ILSON-2026-D01", "12년차", "경남 창원", "결제 서비스 플랫폼팀 리드",
                 "결제 서비스에서 장애 없는 배포를 이끌던 리드 출신입니다. 큰 요청을 하루 안에 끝낼 수 있는 조각으로 나누고, 누가 무엇을 맡을지 먼저 정한 뒤 시작합니다.",
                 [("2014 – 2019", "모바일 결제 스타트업", "백엔드 개발"), ("2019 – 2025", "결제 플랫폼 회사", "플랫폼팀 리드"), ("2026 –", "일손 개발팀", "테크 리드")],
@@ -542,14 +551,16 @@ fn dev_team(safe: bool) -> Vec<Value> {
             "steps": steps_json(safe, "taeo"),
             "form": [
                 { "title": "필수 입력", "fields": [
-                    folder_field(),
-                    { "id": "request", "kind": "textarea", "label": "만들고 싶은 기능", "required": true, "placeholder": "예: 할 일 목록에 마감일과 정렬 기능을 추가해 주세요. 마감이 지난 항목은 빨간색으로 표시합니다." }
+                    optional_folder_field(),
+                    { "id": "request", "kind": "textarea", "label": "만들고 싶은 프로그램·기능", "required": true, "placeholder": "예: 메모 프로그램 만들고 싶어 / 할 일 목록에 마감일과 정렬 기능을 추가해 주세요." }
                 ]},
-                { "title": "팀 구성", "fields": [
+                { "title": "자율 공정 (SOP) 구성", "fields": [
                     { "id": "devs", "kind": "choice", "variant": "chips", "label": "개발 담당", "default": "both", "choices": [
-                        { "value": "both", "label": "유나 + 건우" }, { "value": "frontend", "label": "유나 (화면)" }, { "value": "backend", "label": "건우 (서버·로직)" }
+                        { "value": "both", "label": "건우(코어) + 유나(화면)" }, { "value": "frontend", "label": "유나 (화면)" }, { "value": "backend", "label": "건우 (서버·로직)" }
                     ]},
-                    { "id": "withTests", "kind": "checkbox", "label": "소희가 테스트를 작성·실행", "default": true }
+                    { "id": "withResearch", "kind": "checkbox", "label": "서진이 사전 도메인·UX 리서치 수행", "default": true },
+                    { "id": "withTests", "kind": "checkbox", "label": "소희가 QA·테스트 작성 및 검증", "default": true },
+                    { "id": "withDocs", "kind": "checkbox", "label": "다은이 착수 가이드(README) 작성", "default": true }
                 ]},
                 permission_section(true)
             ]
@@ -693,7 +704,7 @@ pub fn is_ai_step(employee_id: &str, key: &str) -> bool {
         "harin" | "jiho" => key == "write",
         "seojin" | "yena" => key == "analyze",
         "minjae" => key == "research",
-        id if DEV_TEAM.contains(&id) => matches!(key, "team" | "plan" | "frontend" | "backend" | "build" | "test" | "docs" | "review" | "fix"),
+        id if DEV_TEAM.contains(&id) => matches!(key, "team" | "research" | "plan" | "frontend" | "backend" | "build" | "test" | "docs" | "review" | "fix"),
         _ => false,
     }
 }
@@ -772,6 +783,176 @@ pub fn validate(employee: &Value, input: &Value) -> Vec<String> {
     problems
 }
 
+/// 한줄 지시문에서 군더더기 어미를 덜어내 깔끔한 업무/프로젝트 제목을 만든다.
+pub fn clean_project_title(prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or("").trim();
+    let mut s = first_line
+        .trim_end_matches(|c: char| matches!(c, '.' | '!' | '?' | '~' | ' '))
+        .to_string();
+    for tail in [
+        " 프로그램을 만들고 싶습니다",
+        " 프로그램을 만들고 싶어",
+        " 프로그램 만들고 싶습니다",
+        " 프로그램 만들고 싶어",
+        " 프로그램을 만들어 주세요",
+        " 프로그램을 만들어주세요",
+        " 프로그램 만들어 주세요",
+        " 프로그램 만들어주세요",
+        " 프로그램을 만들어줘",
+        " 프로그램 만들어줘",
+        "을 만들고 싶습니다",
+        "를 만들고 싶습니다",
+        "을 만들고 싶어",
+        "를 만들고 싶어",
+        " 만들고 싶습니다",
+        " 만들고 싶어",
+        "을 만들어 주세요",
+        "를 만들어 주세요",
+        "을 만들어주세요",
+        "를 만들어주세요",
+        " 만들어 주세요",
+        " 만들어주세요",
+        "을 만들어줘",
+        "를 만들어줘",
+        " 만들어줘",
+        " 개발해 주세요",
+        " 개발해주세요",
+        " 개발해줘",
+        " 구현해 주세요",
+        " 구현해주세요",
+        " 구현해줘",
+        " 작성해 주세요",
+        " 작성해주세요",
+        " 작성해줘",
+        " 조사해 주세요",
+        " 조사해주세요",
+        " 조사해줘",
+        " 써 주세요",
+        " 써주세요",
+        " 써줘",
+        " 짜 주세요",
+        " 짜주세요",
+        " 짜줘",
+        " 해 주세요",
+        " 해주세요",
+        " 해줘",
+    ] {
+        if let Some(stripped) = s.strip_suffix(tail) {
+            let trimmed = stripped.trim();
+            if !trimmed.is_empty() {
+                if tail.contains("프로그램") && !trimmed.contains("프로그램") && !trimmed.contains("앱") && !trimmed.contains("웹") {
+                    s = format!("{trimmed} 프로그램");
+                } else {
+                    s = trimmed.to_string();
+                }
+                break;
+            }
+        }
+    }
+    let cut: String = s.chars().take(40).collect();
+    if s.chars().count() > 40 {
+        format!("{cut}…")
+    } else if cut.is_empty() {
+        "새 자율 프로젝트".to_string()
+    } else {
+        cut
+    }
+}
+
+/// 한줄 자동업무 라우터: 사용자의 한 줄 지시를 분석해 가장 알맞은 직원·제목·입력값을 구성한다.
+/// `force_program`이 true이거나 프로그램/앱/웹/개발 성격의 요청이면 전사 합동 파이프라인(`taeo`)으로 편성한다.
+pub fn route_one_line(prompt: &str, folder: Option<&str>, force_program: bool) -> (String, String, Value) {
+    let trimmed = prompt.trim();
+    let lower = trimmed.to_lowercase();
+    let folder_str = folder.map(str::trim).unwrap_or("");
+
+    let has_dev_keyword = [
+        "프로그램", "앱", "웹", "사이트", "어플", "게임", "툴", "도구", "시스템", "페이지", "화면", "기능",
+        "개발", "코딩", "코드", "구현", "스크립트", "봇", "계산기", "타이머", "메모", "가계부", "투두",
+        "todo", "app", "web", "대시보드", "에디터", "서버", "api", "클론", "만들고", "만들어", "제작",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw));
+
+    if !force_program && !has_dev_keyword && folder_str.is_empty() {
+        if lower.contains("블로그") || lower.contains("포스팅") || lower.contains("네이버 글") {
+            let kw = clean_project_title(trimmed);
+            return (
+                "harin".into(),
+                format!("‘{kw}’ 블로그 초안"),
+                json!({
+                    "keyword": kw,
+                    "template": "info",
+                    "length": "1500",
+                    "facts": trimmed,
+                    "useBrandStyle": true
+                }),
+            );
+        }
+        if lower.contains("릴스") || lower.contains("쇼츠") || lower.contains("숏폼") || lower.contains("틱톡") || lower.contains("대본") {
+            let topic = clean_project_title(trimmed);
+            return (
+                "jiho".into(),
+                format!("{topic} 숏폼 대본"),
+                json!({
+                    "topic": trimmed,
+                    "platform": "reels",
+                    "duration": "30",
+                    "variants": "3"
+                }),
+            );
+        }
+        if lower.contains("잠재 고객") || lower.contains("거래처") || lower.contains("납품처") || lower.contains("영업 후보") {
+            let target = clean_project_title(trimmed);
+            return (
+                "minjae".into(),
+                format!("{target} 후보 찾기"),
+                json!({
+                    "offering": trimmed,
+                    "target": target,
+                    "count": 10,
+                    "webSearch": "6"
+                }),
+            );
+        }
+        if lower.contains("시장 조사") || lower.contains("트렌드 조사") || lower.contains("경쟁사 조사") || lower.contains("자료 조사") || lower.contains("리서치") {
+            let topic = clean_project_title(trimmed);
+            return (
+                "seojin".into(),
+                format!("{topic} 조사"),
+                json!({
+                    "topic": trimmed,
+                    "purpose": "trend",
+                    "webSearch": "6"
+                }),
+            );
+        }
+    }
+
+    let base_title = clean_project_title(trimmed);
+    let title = if base_title.ends_with("제작") || base_title.ends_with("개발") {
+        base_title
+    } else {
+        format!("{base_title} 제작")
+    };
+    (
+        "taeo".into(),
+        title,
+        json!({
+            "folder": folder_str,
+            "request": trimmed,
+            "devs": "both",
+            "withResearch": true,
+            "withTests": true,
+            "withDocs": true,
+            "allowRun": true,
+            "allowInit": true,
+            "autoMerge": folder_str.is_empty(),
+            "oneLineAuto": true
+        }),
+    )
+}
+
 /// 업무 이름을 비워 두면 입력 내용으로 이름을 짓는다.
 pub fn default_title(employee: &Value, input: &Value) -> String {
     let pick = |k: &str| input[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
@@ -788,11 +969,7 @@ pub fn default_title(employee: &Value, input: &Value) -> String {
         }),
         "jiho" => pick("topic").map(|t| format!("{t} 숏폼 대본")),
         "yena" => Some("지원사업 공고 점검".to_string()),
-        "taeo" | "yuna" | "geonwoo" | "sohee" | "daeun" => pick("request").map(|r| {
-            let line = r.lines().next().unwrap_or("").trim();
-            let cut: String = line.chars().take(36).collect();
-            if line.chars().count() > 36 { format!("{cut}…") } else { cut }
-        }),
+        "taeo" | "yuna" | "geonwoo" | "sohee" | "daeun" => pick("request").map(|r| clean_project_title(&r)),
         "minhyuk" => Some("코드 리뷰".to_string()),
         _ => None,
     };

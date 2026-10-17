@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, fmtTokens, relativeTime, won, type Task, type UsageSummary } from "../api";
 import { useStore } from "../store";
 import { Avatar, Empty, Icon, StatusBadge } from "../components/ui";
+import { OneLineAutoBox } from "../components/OneLineAutoBox";
 
 function TaskRow({ task }: { task: Task }) {
   const { employee, navigate } = useStore();
@@ -48,7 +49,7 @@ export function HomePage() {
   const setup = boot.employees.filter((e) => e.availability.status === "setup_required");
   const usedEngines = new Set(boot.employees.map((e) => e.engine?.id).filter(Boolean));
   const engineMissing = boot.engines.some((e) => usedEngines.has(e.id) && e.installed && !e.signedIn && e.message !== "확인 중");
-  const safe = boot.settings.engineMode !== "auto" || !boot.settings.autoAckAt;
+  const safe = boot.settings.engineMode !== "auto";
 
   return (
     <div className="page">
@@ -70,6 +71,8 @@ export function HomePage() {
         </div>
       )}
 
+      <OneLineAutoBox />
+
       <section className="hero">
         <div className="hero__copy">
           <span className="eyebrow">오늘의 회사</span>
@@ -88,14 +91,14 @@ export function HomePage() {
               </>
             ) : (
               <>
-                맡길 일 하나를 골라
+                직원을 직접 골라
                 <br />
-                <em>직원에게</em> 넘겨 보세요.
+                <em>맞춤 업무</em>를 맡길 수도 있어요.
               </>
             )}
           </h2>
           <p>
-            API 키 없이 OpenCode(DeepSeek Flash 무료) 엔진으로 일합니다. 코드 병합과 파일 이동은 항상 사장님 확인을 받은 뒤에 진행합니다.
+            위 <strong>한줄 자동업무</strong>에 “메모 프로그램 만들고 싶어”처럼 치면 리서치·기획·개발·QA·착수까지 알아서 진행합니다. 특정 직원에게 세밀하게 지시하려면 아래 버튼을 누르세요.
             {summary && summary.yesterdayTasks > 0 && (
               <span style={{ display: "block", marginTop: 4, color: "var(--brand)" }}>
                 어제 완료: {summary.yesterdayTasks}건 · {fmtTokens(summary.yesterdayTokens)} 토큰
@@ -103,7 +106,7 @@ export function HomePage() {
             )}
           </p>
           <button className="btn btn--primary" onClick={() => newTask()}>
-            <Icon name="plus" size={16} /> 새 업무 맡기기
+            <Icon name="plus" size={16} /> 새 업무 맡기기 (직원 직접 지정)
           </button>
         </div>
         <div className="hero__stats">

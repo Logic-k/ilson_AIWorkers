@@ -539,6 +539,88 @@ fn plan_text(ctx: &Ctx) -> String {
     ctx.out("plan")["markdown"].as_str().unwrap_or("").to_string()
 }
 
+fn research_text(ctx: &Ctx) -> String {
+    ctx.out("research")["markdown"].as_str().unwrap_or("").to_string()
+}
+
+/// 작업 공간의 기존 파일 목록과 빈 프로젝트(Greenfield) 여부를 파악한다.
+fn workspace_files_summary(dir: &Path) -> (bool, String) {
+    let mut files = Vec::new();
+    fn visit(root: &Path, current: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 3 || out.len() >= 60 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(current) else { return };
+        let mut list: Vec<_> = entries.flatten().collect();
+        list.sort_by_key(|e| e.file_name());
+        for entry in list {
+            if out.len() >= 60 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.')
+                || matches!(name.as_str(), "node_modules" | "target" | "dist" | "build" | "__pycache__")
+            {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, depth + 1, out);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    visit(dir, dir, 0, &mut files);
+    if files.is_empty() {
+        (true, "(비어 있는 새 프로젝트 폴더 — 처음부터 완전히 동작하는 프로그램을 새로 구성해야 함)".to_string())
+    } else {
+        (false, files.join(", "))
+    }
+}
+
+/// 폴더를 따로 고르지 않았을 때 자동으로 새 프로젝트 폴더를 만든다.
+fn default_project_folder(ctx: &Ctx) -> Result<PathBuf> {
+    let raw_title = roster::clean_project_title(&ctx.title);
+    let slug: String = raw_title
+        .chars()
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() {
+                '_'
+            } else if c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .chars()
+        .take(28)
+        .collect();
+    let slug = if slug.is_empty() { "새_프로그램".to_string() } else { slug };
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let folder_name = format!("{stamp}_{slug}");
+
+    let base = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|home| PathBuf::from(home).join("Documents").join("일손_프로젝트"))
+        .unwrap_or_else(|_| ctx.data_dir.join("projects"));
+    let target = base.join(folder_name);
+    std::fs::create_dir_all(&target)
+        .or_else(|_| {
+            let fallback = ctx.data_dir.join("projects").join(format!("{stamp}_{slug}"));
+            std::fs::create_dir_all(&fallback).map(|_| ())
+        })
+        .map_err(|e| anyhow!("새 프로젝트 폴더를 만들 수 없습니다: {e}"))?;
+    let final_dir = if target.is_dir() {
+        target
+    } else {
+        ctx.data_dir.join("projects").join(format!("{stamp}_{slug}"))
+    };
+    Ok(final_dir)
+}
+
 fn skipped(note: &str) -> StepResult {
     StepResult::new(json!({ "skipped": true }), note)
 }
@@ -560,9 +642,19 @@ fn run_mode(ctx: &Ctx, edits: bool) -> Level {
     }
 }
 
-fn review_prompt(focus: &str, patch: &str, safe: bool) -> String {
+fn review_prompt(focus: &str, plan_md: &str, test_md: &str, patch: &str, safe: bool) -> String {
+    let plan_block = if plan_md.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n[태오의 프로그램 기획·설계서 (수용 기준)]\n{plan_md}\n")
+    };
+    let test_block = if test_md.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n[소희의 QA·테스트 검증 보고]\n{test_md}\n")
+    };
     format!(
-        "{}\n아래 변경을 검토한다. 코드는 고치지 않는다. 필요하면 파일을 읽어 맥락을 확인한다. 확신이 없는 지적은 ‘확인 필요’라고 표시한다.\n\n[요청·중점]\n{}\n\n[변경 내용 (diff)]\n```diff\n{patch}\n```\n\n{}\n\n# 코드 리뷰\n## 요약\n## 반드시 고칠 것\n(없으면 '없음'. 있으면 파일:줄 · 문제 · 고치는 방법)\n## 고치면 좋은 것\n## 좋았던 점\n\n마지막 줄에는 정확히 `판정: 통과` 또는 `판정: 수정 필요` 중 하나만 쓴다.",
+        "{}\n아래 변경을 검토한다. 코드는 고치지 않는다. 필요하면 작업 공간의 실제 파일을 읽어 맥락과 연결 상태를 확인한다. 확신이 없는 지적은 ‘확인 필요’라고 표시한다.\n\n검토 원칙\n1. 태오 설계서의 ‘수용 기준(Acceptance Criteria)’이 빠짐없이 구현되었는지 확인한다.\n2. 클릭해도 동작하지 않는 더미 버튼, 미구현 TODO, 코어 로직과 화면 UI 사이의 함수/DOM ID 불일치, 런타임 에러 가능성을 집중 점검한다.\n3. 사소한 취향 차이가 아니라 실제로 프로그램 동작을 가로막는 중대한 결함이 있을 때만 `판정: 수정 필요`를 내린다.\n\n[요청·중점]\n{}\n{plan_block}{test_block}\n[변경 내용 (diff)]\n```diff\n{patch}\n```\n\n{}\n\n# 코드 리뷰\n## 요약\n## 반드시 고칠 것\n(없으면 '없음'. 있으면 파일:줄 · 문제 · 고치는 방법)\n## 고치면 좋은 것\n## 좋았던 점\n\n마지막 줄에는 정확히 `판정: 통과` 또는 `판정: 수정 필요` 중 하나만 쓴다.",
         persona("minhyuk"),
         if focus.is_empty() { "(따로 없음)" } else { focus },
         finish_rule(safe, "minhyuk", true)
@@ -619,26 +711,38 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             let sub = supports_subagents(ctx.settings.engine_for("taeo"));
             let who = |id: &str, name: &str| if sub { format!("서브에이전트 ilson-{id}({name})에게") } else { format!("{name}의 역할로 직접") };
             let mut team = vec!["taeo"];
-            let mut order = vec![format!("1. 설계: 저장소를 읽고 설계서(목표·관련 파일·변경 계획·수용 기준)를 `{PROGRESS_DIR}/plan.md`에 쓴다.")];
-            let mut n = 2;
-            if devs != "backend" {
-                team.push("yuna");
-                order.push(format!("{n}. 화면 개발: {} 설계서의 화면 부분을 구현한다.", who("yuna", "유나")));
+            let mut order = Vec::new();
+            let mut n = 1;
+            if ctx.b("withResearch", true) {
+                team.push("seojin");
+                order.push(format!("{n}. 도메인·UX 리서치: {} 요청의 핵심 기능, 엣지 케이스, UX 벤치마크를 조사해 `{PROGRESS_DIR}/research.md`에 정리한다.", who("seojin", "서진")));
                 n += 1;
             }
+            order.push(format!("{n}. 프로그램 기획·설계: 저장소와 리서치를 읽고 상세 설계서(목표·파일 트리·데이터 스키마·인터페이스 계약·수용 기준)를 `{PROGRESS_DIR}/plan.md`에 쓴다."));
+            n += 1;
             if devs != "frontend" {
                 team.push("geonwoo");
-                order.push(format!("{n}. 서버·로직 개발: {} 설계서의 서버·로직 부분을 구현한다.", who("geonwoo", "건우")));
+                order.push(format!("{n}. 코어·로직 개발: {} 설계서의 코어·데이터·비즈니스 로직을 구현한다.", who("geonwoo", "건우")));
+                n += 1;
+            }
+            if devs != "backend" {
+                team.push("yuna");
+                order.push(format!("{n}. 화면·UI 개발: {} 설계서의 화면과 인터랙션을 구현하고 코어 로직과 완전히 연결한다.", who("yuna", "유나")));
                 n += 1;
             }
             if ctx.b("withTests", true) {
                 team.push("sohee");
-                order.push(format!("{n}. 테스트: {} 테스트를 작성하고 실행한다.", who("sohee", "소희")));
+                order.push(format!("{n}. QA·테스트 검증: {} 수용 기준과 모듈 간 연결을 검증하고 통합 문제를 수정한다.", who("sohee", "소희")));
                 n += 1;
             }
             team.push("minhyuk");
-            order.push(format!("{n}. 리뷰: {} 변경을 리뷰하고, ‘반드시 고칠 것’이 있으면 반영한다.", who("minhyuk", "민혁")));
+            order.push(format!("{n}. 코드 리뷰: {} 변경을 리뷰하고, ‘반드시 고칠 것’이 있으면 반영한다.", who("minhyuk", "민혁")));
             n += 1;
+            if ctx.b("withDocs", true) {
+                team.push("daeun");
+                order.push(format!("{n}. 착수 가이드 문서화: {} `README.md`에 프로그램 기능과 바로 실행하는 방법을 정리한다.", who("daeun", "다은")));
+                n += 1;
+            }
             order.push(format!("{n}. 마무리: 전체 결과를 아래 형식으로 `{PROGRESS_DIR}/report-taeo.md`에 쓴다. 이 파일이 생기면 회사가 업무를 마친 것으로 본다."));
             let prompt = format!(
                 "# 업무 지시서 — {}\n\n{}\n\n## 요청\n{request}\n\n## 진행 순서\n{}\n\n## 진행 표시\n각 직원은 일을 시작할 때 `{PROGRESS_DIR}/status-<이름>.txt`에 지금 하는 일을 한 줄로 쓰고, 끝나면 `{PROGRESS_DIR}/report-<이름>.md`에 보고서를 쓴다. (이름: {})\n\n{}",
@@ -651,18 +755,51 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             let team: Vec<&str> = if sub { team } else { vec!["taeo"] };
             Ok(job("taeo", ws_path()?, prompt, run_mode(ctx, true), true, "팀 개발", &team))
         }
-        "plan" => {
-            let devs = match ctx.s("devs").as_str() {
-                "frontend" => "유나(화면)만",
-                "backend" => "건우(서버·로직)만",
-                _ => "유나(화면)와 건우(서버·로직) 둘 다",
+        "research" => {
+            if emp == "taeo" && !ctx.b("withResearch", true) {
+                return Ok(Plan::Skip("이번 업무에서는 사전 리서치를 건너뛰었습니다."));
+            }
+            let cwd = ws_path()?;
+            let (is_greenfield, files_summary) = workspace_files_summary(&cwd);
+            let mode_desc = if is_greenfield {
+                "새 프로그램 처음부터 만들기 (Greenfield 프로젝트)"
+            } else {
+                "기존 프로젝트 분석 및 기능 고도화 (Brownfield 프로젝트)"
             };
             let prompt = format!(
-                "{}\n아래 요청을 이 저장소에서 구현하기 위한 설계서를 쓴다. 코드를 읽어 구조를 파악하되 파일은 고치지 않는다. 이번에 일할 개발자: {devs}.\n\n[요청]\n{request}\n\n{}\n\n# 설계: (제목)\n## 목표\n## 현재 구조 (관련 파일)\n## 변경 계획\n### 화면 — 유나 (해당 없으면 '없음')\n### 서버·로직 — 건우 (해당 없으면 '없음')\n## 수용 기준\n- [ ] …\n## 확인 필요",
-                persona("taeo"),
-                finish_rule(safe_for("taeo"), "taeo", true)
+                "{}\n너는 개발팀(태오·건우·유나·소희)이 착수하기 전에 **도메인·핵심 기능·UX·권장 아키텍처 리서치 브리프**를 작성하는 역할이다.\n코드는 아직 작성하지 않는다(파일 수정 금지). 기존 파일이 있다면 읽기만 하여 구조를 파악한다.\n\n[사장님 한줄/상세 요청]\n{request}\n\n[작업 유형]\n- 유형: {mode_desc}\n- 현재 작업 공간 파일: {files_summary}\n\n{}\n\n아래 형식의 마크다운으로 구체적이고 실용적인 리서치 브리프를 작성한다.\n\n# 도메인 & 프로그램 리서치 브리프: {}\n> 한 줄 핵심 가치 요약\n## 1. 사용자 의도 및 해결하려는 핵심 문제\n## 2. 필수 핵심 기능 (MVP Core Features)\n(사장님이 짧게 말했더라도 이 프로그램이 실제로 쓸모 있으려면 반드시 들어가야 할 핵심 기능 4~6가지를 구체적인 동작 단위로 정의)\n## 3. 데이터 영속성 및 엣지 케이스\n- 데이터 저장 방식 (새로고침/재실행 시 데이터 유지 방법, 초기 샘플 데이터 구성)\n- 놓치기 쉬운 엣지 케이스 (빈 상태 화면, 잘못된 입력 방어, 검색/필터/삭제 확인 등)\n## 4. 벤치마크 UX/UI 디자인 가이드\n- 화면 레이아웃 구성 및 시각적 계층 구조\n- 컬러 테마 및 직관적인 상태 피드백, 단축키/편의 기능\n## 5. 권장 기술 스택 및 파일 아키텍처\n(새 프로젝트이고 별도 프레임워크 지정이 없다면, 외부 빌드 없이 즉시 브라우저/로컬에서 열 수 있는 모던 Vanilla HTML5 + CSS3 + ES6 JavaScript 아키텍처(`index.html`, `styles.css`, `core.js`, `app.js`) 또는 요청에 가장 적합한 스택을 명확히 제안)",
+                persona("seojin"),
+                finish_rule(safe_for("seojin"), "seojin", true),
+                ctx.title
             );
-            Ok(job("taeo", ws_path()?, prompt, Level::ReadOnly, false, "기획", &["taeo"]))
+            Ok(job("seojin", cwd, prompt, Level::ReadOnly, false, "도메인·UX 리서치", &["seojin"]))
+        }
+        "plan" => {
+            let cwd = ws_path()?;
+            let (is_greenfield, files_summary) = workspace_files_summary(&cwd);
+            let devs = match ctx.s("devs").as_str() {
+                "frontend" => "유나(화면·UI)만",
+                "backend" => "건우(코어·로직)만",
+                _ => "건우(코어·데이터·로직)와 유나(화면·UI·인터랙션) 둘 다",
+            };
+            let research = research_text(ctx);
+            let research_block = if research.is_empty() {
+                String::new()
+            } else {
+                format!("\n[서진의 사전 도메인·UX 리서치 브리프]\n{research}\n")
+            };
+            let greenfield_rule = if is_greenfield {
+                "- 현재 작업 공간은 **비어 있는 새 프로젝트**다. 요청에 특정 프레임워크/언어가 명시되지 않았다면, 별도 서버 빌드 없이도 바로 실행 가능한 완성형 웹 애플리케이션(`index.html`, `styles.css`, `core.js` 또는 `app.js`) 구조로 설계하여 사장님이 완성 즉시 실행해 볼 수 있게 한다.\n- 건우가 핵심 데이터 모델·스토리지(`localStorage` 등)·비즈니스 로직(`core.js` 등)을 먼저 만들고, 유나가 `index.html`, `styles.css`, UI 이벤트 바인딩(`app.js`)을 만들어 건우의 로직과 100% 맞물리게 역할을 나눈다. (만약 단일 파일이나 다른 분담이 더 안전하면 두 사람이 충돌하지 않게 담당 파일과 인터페이스를 명확히 지정한다.)"
+            } else {
+                "- 기존 작업 공간의 파일들을 먼저 읽고, 기존 아키텍처와 코드 스타일을 존중하여 변경할 파일과 새로 만들 파일을 명확히 지정한다."
+            };
+            let prompt = format!(
+                "{}\n아래 요청과 리서치 브리프를 바탕으로 개발팀이 흔들림 없이 구현할 수 있는 **프로그램 기획 및 상세 설계서 (PRD & System Design)**를 작성한다.\n파일은 아직 수정하지 않는다.\n\n[요청]\n{request}\n\n[작업 공간 현황]\n- 참여 개발자: {devs}\n- 현재 파일 목록: {files_summary}\n{research_block}\n설계 원칙 (MetaGPT SOP)\n{greenfield_rule}\n- 건우(코어·로직)와 유나(화면·UI)가 서로 다른 함수 이름이나 데이터 필드를 써서 어긋나는 일이 없도록, **함수 시그니처·전역 객체/모듈 export 이름·데이터 스키마·DOM ID 계약**을 코드 수준으로 명확히 적는다.\n\n{}\n\n# 프로그램 기획 및 설계: {}\n## 1. 프로그램 목표 및 핵심 워크플로우\n## 2. 파일 트리 및 모듈 구성 (File Tree)\n- `파일경로`: 역할 설명 (담당: 건우 / 유나)\n## 3. 데이터 스키마 및 저장소 설계 (Data Schema & Persistence)\n(데이터 구조체/JSON 예시, 저장소 키, 초기 기본 샘플 데이터)\n## 4. 인터페이스 계약 및 역할 분담 (Interface Contract)\n### 서버·로직 — 건우 (해당 없으면 '없음')\n- 담당 파일:\n- 공개 함수/클래스 시그니처 및 동작 명세:\n### 화면 — 유나 (해당 없으면 '없음')\n- 담당 파일:\n- UI 레이아웃, 주요 DOM ID/클래스, 건우 모듈 호출 및 이벤트 연결 명세:\n## 5. 수용 기준 (Acceptance Criteria — QA 체크리스트)\n- [ ] (소희와 민혁이 검증할 구체적인 기능 동작 기준 5~8개)",
+                persona("taeo"),
+                finish_rule(safe_for("taeo"), "taeo", true),
+                ctx.title
+            );
+            Ok(job("taeo", cwd, prompt, Level::ReadOnly, false, "프로그램 기획·설계", &["taeo"]))
         }
         "frontend" | "backend" | "build" => {
             let actor = match (key, emp) {
@@ -675,9 +812,26 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             if (key == "frontend" && devs == "backend") || (key == "backend" && devs == "frontend") {
                 return Ok(Plan::Skip("이번 업무에서는 맡지 않았습니다."));
             }
+            let cwd = ws_path()?;
+            let (_, files_summary) = workspace_files_summary(&cwd);
             let part = if actor == "yuna" { "화면 — 유나" } else { "서버·로직 — 건우" };
+            let research = research_text(ctx);
+            let research_block = if research.is_empty() {
+                String::new()
+            } else {
+                format!("\n[서진의 리서치 브리프 (참고)]\n{research}\n")
+            };
             let plan = plan_text(ctx);
-            let plan_block = if plan.is_empty() { String::new() } else { format!("\n[태오의 설계서 — ‘{part}’ 부분을 맡는다]\n{plan}\n") };
+            let plan_block = if plan.is_empty() {
+                String::new()
+            } else {
+                format!("\n[태오의 프로그램 기획·설계서 — ‘{part}’ 파트를 중심으로 구현]\n{plan}\n")
+            };
+            let role_guide = if actor == "geonwoo" {
+                "구현 지침 (건우 · 코어·로직)\n- 설계서에 정의된 데이터 스키마, 상태 관리, 영구 저장(`localStorage` 또는 파일/DB), 검색/필터/계산/내보내기 등 핵심 비즈니스 로직과 초기 샘플 데이터를 빈틈없이 구현한다.\n- 다음 단계에서 유나(화면 개발)가 너의 함수와 객체를 바로 호출할 수 있도록 설계서의 인터페이스 계약(함수명, 전역 `window.*` 또는 ES 모듈 export)을 정확히 지킨다.\n- `// TODO`나 빈 껍데기 함수를 남기지 말고 모든 로직이 실제로 동작하게 작성한다."
+            } else {
+                "구현 지침 (유나 · 화면·UI·통합)\n- 먼저 현재 작업 공간에 있는 파일(특히 건우가 앞서 만든 코어 로직 파일)을 반드시 읽고, 그 함수 시그니처와 데이터 구조를 정확히 호출하여 화면 UI와 연결한다.\n- 모던하고 완성도 높은 디자인(반응형 레이아웃, 세련된 여백·색상·타이포그래피, 빈 상태 안내, 토스트/모달 피드백, 키보드 엔터/단축키 지원)을 구현한다.\n- 클릭해도 아무 일도 일어나지 않는 더미 버튼이나 깨진 스크립트 참조가 절대 없도록 모든 UI 이벤트를 실제 로직과 연결한다."
+            };
             // 안전 모드 개인 업무는 한 번의 실행 안에서 민혁에게 리뷰까지 받는다.
             let sub = supports_subagents(ctx.settings.engine_for(actor));
             let review = match (is_safe(ctx) && key == "build", sub) {
@@ -685,34 +839,60 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
                 (true, false) => "\n- 구현을 마치면 코드 리뷰어의 눈으로 변경을 다시 읽고(버그·보안·가독성), 고칠 점을 반영한 뒤 보고서의 ‘남은 문제’에 리뷰 결과를 적는다.",
                 _ => "",
             };
-            let prompt = format!("{}\n\n[요청]\n{request}\n{plan_block}\n{}{review}", persona(actor), rules(ctx.b("allowRun", false), safe_for(actor), actor));
+            let prompt = format!(
+                "{}\n\n[요청]\n{request}\n\n[현재 작업 공간 파일 목록]\n{files_summary}\n{research_block}{plan_block}\n{role_guide}\n\n{}{review}",
+                persona(actor),
+                rules(ctx.b("allowRun", false), safe_for(actor), actor)
+            );
             let team: &[&str] = if is_safe(ctx) && key == "build" && sub { &[actor, "minhyuk"] } else { &[actor] };
-            Ok(job(actor, ws_path()?, prompt, run_mode(ctx, true), true, if actor == "yuna" { "화면 개발" } else { "서버·로직 개발" }, team))
+            Ok(job(actor, cwd, prompt, run_mode(ctx, true), true, if actor == "yuna" { "화면·UI 개발" } else { "코어·로직 개발" }, team))
         }
         "test" => {
             if emp == "taeo" && !ctx.b("withTests", true) {
                 return Ok(Plan::Skip("이번 업무에서는 테스트를 맡기지 않았습니다."));
             }
             let ws = ctx.workspace()?;
+            let cwd = PathBuf::from(&ws.path);
             let changed = gitops::diff(&ws).map(|d| d.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            let plan = plan_text(ctx);
+            let plan_block = if plan.is_empty() {
+                String::new()
+            } else {
+                format!("\n[태오의 프로그램 기획·설계서 (수용 기준 확인용)]\n{plan}\n")
+            };
             let prompt = format!(
-                "{}\n이번 작업에 대한 테스트를 작성하거나 보강한다. 명령 실행이 허용되면 테스트를 실행해 결과를 확인한다. 실패한 테스트를 지우거나 건너뛰게 고치지 않는다. 테스트 도구가 없으면 프로젝트에 맞는 가장 가벼운 방법을 쓰고 그 이유를 적는다.\n\n[요청]\n{request}\n\n[이번에 바뀐 파일]\n{}\n\n{}\n\n보고서의 ‘한 일’에는 추가한 테스트를, ‘확인 방법’에는 실행 결과(통과/실패 개수)를 적는다.",
+                "{}\n너는 QA 엔지니어이자 통합 검증 담당이다. 아래 순서로 프로그램을 철저히 검증하고 문제가 있으면 직접 고친다.\n\n1. **통합 및 연결 무결성 검증**: 생성·변경된 모든 파일을 읽고, HTML의 `<script>`/`<link>` 경로, 건우(코어 로직)의 함수/데이터 필드명과 유나(화면 UI)의 호출 코드·DOM ID/셀렉터가 100% 일치하는지 전수 대조한다. 불일치나 누락, 런타임 에러 가능성을 발견하면 즉시 코드를 수정해 완벽히 동작하게 만든다.\n2. **수용 기준(Acceptance Criteria) 점검**: 태오 설계서의 수용 기준이 모두 구현되었는지 하나씩 확인하고, 빠진 기능이 있으면 보완한다.\n3. **자동화 테스트 / 문법 검증**: 명령 실행이 허용되면 `node --check`나 프로젝트 테스트 러너로 문법·로직 오류를 검증한다.\n\n[요청]\n{request}\n{plan_block}\n[이번에 바뀐 파일]\n{}\n\n{}\n\n보고서의 ‘한 일’에는 수용 기준별 통과 여부와 발견해 고친 통합 문제를, ‘확인 방법’에는 검증 및 실행 방법을 적는다.",
                 persona("sohee"),
                 if changed.is_empty() { "(아직 없음 — 요청 범위의 기존 코드를 테스트)".to_string() } else { changed },
                 rules(ctx.b("allowRun", false), safe_for("sohee"), "sohee")
             );
-            Ok(job("sohee", PathBuf::from(ws.path), prompt, run_mode(ctx, true), true, "테스트", &["sohee"]))
+            Ok(job("sohee", cwd, prompt, run_mode(ctx, true), true, "QA·테스트 검증", &["sohee"]))
         }
         "docs" => {
-            let prompt = format!("{}\n코드를 읽고, 코드에 실제로 있는 내용만 문서로 쓴다.\n\n[요청]\n{request}\n\n{}", persona("daeun"), rules(false, safe_for("daeun"), "daeun"));
-            Ok(job("daeun", ws_path()?, prompt, Level::Edit, true, "문서", &["daeun"]))
+            if emp == "taeo" && !ctx.b("withDocs", true) {
+                return Ok(Plan::Skip("이번 업무에서는 착수 가이드 문서화를 건너뛰었습니다."));
+            }
+            let cwd = ws_path()?;
+            let (_, files_summary) = workspace_files_summary(&cwd);
+            let plan = plan_text(ctx);
+            let plan_block = if plan.is_empty() {
+                String::new()
+            } else {
+                format!("\n[태오의 설계서]\n{plan}\n")
+            };
+            let prompt = format!(
+                "{}\n완성된 프로그램의 코드를 읽고, 사장님이 바로 프로그램을 켜고 사용할 수 있도록 친절한 `README.md` (착수 및 실행 가이드)를 작성한다. 기존 코드 동작은 망가뜨리지 않고 문서(`README.md` 등)만 작성·보강한다.\n\n`README.md` 필수 포함 내용:\n1. 프로그램 이름과 한 줄 소개\n2. 주요 기능 요약 및 사용 방법 (단축키, 데이터 저장 안내 등)\n3. **🚀 바로 실행(착수)하는 방법** (예: 폴더 안의 `index.html` 파일을 더블클릭해 브라우저에서 바로 열기, 또는 실행 명령어)\n4. 파일 구조 설명\n\n[요청]\n{request}\n\n[현재 작업 공간 파일]\n{files_summary}\n{plan_block}\n{}",
+                persona("daeun"),
+                rules(false, safe_for("daeun"), "daeun")
+            );
+            Ok(job("daeun", cwd, prompt, Level::Edit, true, "착수 가이드·문서화", &["daeun"]))
         }
         "review" if emp == "minhyuk" => {
             let (repo, patch) = gitops::review_target(&ctx.s("folder"), &ctx.s("scope"))?;
             // 안전 모드에서는 사장님 저장소에 관리용 파일을 남기지 않도록 업무 폴더에서 실행한다.
             let safe = safe_for("minhyuk");
             let cwd = if safe { ctx.data_dir.join("runs").join(&ctx.task_id) } else { PathBuf::from(&repo) };
-            let mut prompt = review_prompt(&ctx.s("focus"), &patch, safe);
+            let mut prompt = review_prompt(&ctx.s("focus"), "", "", &patch, safe);
             if safe {
                 prompt.push_str(&format!("\n\n원본 저장소는 `{repo}`에 있다. 맥락이 필요하면 그곳의 파일을 읽기만 한다."));
             }
@@ -728,7 +908,9 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             if diff.truncated {
                 patch.push_str("\n…(diff가 길어 일부만 보냅니다. 필요한 파일은 직접 읽어 확인할 것)");
             }
-            Ok(job("minhyuk", PathBuf::from(ws.path), review_prompt(&request, &patch, safe_for("minhyuk")), Level::ReadOnly, false, "코드 리뷰", &["minhyuk"]))
+            let plan = plan_text(ctx);
+            let test_md = ctx.out("test")["markdown"].as_str().unwrap_or("");
+            Ok(job("minhyuk", PathBuf::from(ws.path), review_prompt(&request, &plan, test_md, &patch, safe_for("minhyuk")), Level::ReadOnly, false, "코드·품질 리뷰", &["minhyuk"]))
         }
         "fix" => {
             let review = ctx.out("review");
@@ -736,13 +918,15 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
                 return Ok(Plan::Skip("리뷰를 통과해 반영할 것이 없습니다."));
             }
             let actor = dev_for_fix(ctx);
+            let plan = plan_text(ctx);
+            let plan_block = if plan.is_empty() { String::new() } else { format!("\n[태오의 설계서]\n{plan}\n") };
             let prompt = format!(
-                "{}\n코드 리뷰어 민혁의 의견 중 ‘반드시 고칠 것’을 반영한다. 동의하지 않는 지적은 고치지 말고 보고서의 ‘남은 문제’에 이유를 적는다.\n\n[요청]\n{request}\n\n[민혁의 리뷰]\n{}\n\n{}",
+                "{}\n코드 리뷰어 민혁의 의견 중 ‘반드시 고칠 것’을 반영하여 프로그램을 완결한다. 동의하지 않는 지적은 고치지 말고 보고서의 ‘남은 문제’에 이유를 적는다.\n\n[요청]\n{request}\n{plan_block}\n[민혁의 리뷰]\n{}\n\n{}",
                 persona(actor),
                 review["markdown"].as_str().unwrap_or(""),
                 rules(ctx.b("allowRun", false), safe_for(actor), actor)
             );
-            Ok(job(actor, ws_path()?, prompt, run_mode(ctx, true), true, "리뷰 반영", &[actor]))
+            Ok(job(actor, ws_path()?, prompt, run_mode(ctx, true), true, "리뷰 반영·보완", &[actor]))
         }
         _ => Ok(Plan::Local),
     }
@@ -1048,6 +1232,11 @@ async fn ai_step(ctx: &Ctx, key: &str, job: AiJob) -> Result<StepResult> {
     if out.markdown.trim().is_empty() {
         bail!("AI가 빈 결과를 돌려주었습니다. 이어하기로 다시 시도해 주세요.");
     }
+    if matches!(key, "research" | "plan") {
+        let progress = job.cwd.join(PROGRESS_DIR);
+        let _ = std::fs::create_dir_all(&progress);
+        let _ = std::fs::write(progress.join(format!("{key}.md")), &out.markdown);
+    }
     let mut note = out.note;
     let mut output = json!({ "markdown": out.markdown, "actor": job.actor, "model": out.model });
     if job.edits {
@@ -1075,6 +1264,9 @@ async fn ai_step(ctx: &Ctx, key: &str, job: AiJob) -> Result<StepResult> {
 /// 이 단계 앞에서 받아야 하는 확인. (kind, 확인 키)
 pub fn gate_kind(ctx: &Ctx, step_key: &str, static_gate: Option<&str>) -> Result<Option<String>> {
     if let Some(g) = static_gate {
+        if g == "merge" && (ctx.b("autoMerge", false) || ctx.out("setup")["autoFolder"] == true) {
+            return Ok(None);
+        }
         return Ok(Some(format!("{g}:{step_key}")));
     }
     if let Plan::Ai(job) = plan(ctx, step_key)? {
@@ -1131,19 +1323,34 @@ fn merge_gate(ctx: &Ctx) -> Result<Option<Gate>> {
 
 // ───────────────────────── 개발팀 결과 ─────────────────────────
 
+fn find_entry_html(repo_dir: &str) -> Option<String> {
+    if repo_dir.is_empty() {
+        return None;
+    }
+    let base = Path::new(repo_dir);
+    for rel in ["index.html", "public/index.html", "src/index.html", "dist/index.html"] {
+        let candidate = base.join(rel);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 fn code_report(ctx: &Ctx) -> Value {
     let mut md = format!("# {}\n\n", ctx.title);
     let mut sections = vec![];
     for (key, title) in [
         ("team", "팀 보고 · 태오"),
-        ("plan", "설계 · 태오"),
-        ("frontend", "화면 개발 · 유나"),
-        ("backend", "서버·로직 개발 · 건우"),
+        ("research", "도메인·UX 리서치 · 서진"),
+        ("plan", "프로그램 기획·설계 · 태오"),
+        ("backend", "코어·로직 개발 · 건우"),
+        ("frontend", "화면·UI 개발 · 유나"),
         ("build", ""),
-        ("test", "테스트 · 소희"),
-        ("docs", "문서 · 다은"),
-        ("review", "코드 리뷰 · 민혁"),
-        ("fix", "리뷰 반영"),
+        ("test", "QA·테스트 검증 · 소희"),
+        ("review", "코드·품질 리뷰 · 민혁"),
+        ("fix", "리뷰 반영·보완"),
+        ("docs", "착수 가이드·문서 · 다은"),
     ] {
         let out = ctx.out(key);
         if out.is_null() || out["skipped"] == true {
@@ -1157,6 +1364,12 @@ fn code_report(ctx: &Ctx) -> Value {
         md.push_str(&format!("## {heading}\n\n{body}\n\n"));
     }
     let merge = ctx.out("merge");
+    let setup = ctx.out("setup");
+    let ws = &setup["workspace"];
+    let repo_str = ws["repo"].as_str().unwrap_or("");
+    let entry_html = find_entry_html(repo_str).or_else(|| {
+        ws["path"].as_str().and_then(find_entry_html)
+    });
     let verdict = ["review", "team", "build"].iter().find_map(|k| ctx.outputs.get(*k).and_then(|r| r["verdict"].as_str()).map(String::from));
     json!({
         "kind": "code",
@@ -1170,22 +1383,46 @@ fn code_report(ctx: &Ctx) -> Value {
         "removed": merge["removed"],
         "commits": merge["commits"],
         "verdict": verdict,
-        "workspace": ctx.out("setup")["workspace"],
+        "workspace": ws,
+        "autoFolder": setup["autoFolder"],
+        "entryHtml": entry_html,
     })
 }
 
 async fn local_coding_step(ctx: &Ctx, key: &str) -> Result<StepResult> {
     match key {
         "setup" => {
-            let ws = gitops::prepare(&ctx.s("folder"), &ctx.data_dir.join("worktrees"), &ctx.short_id(), ctx.b("allowInit", true))?;
-            let mut note = format!("작업 공간을 만들었습니다 · 브랜치 {} (기준 {})", ws.branch, ws.base_branch);
-            if ws.initialized {
+            let raw_folder = ctx.s("folder");
+            let auto_folder = raw_folder.is_empty();
+            let target_folder = if auto_folder {
+                let dir = default_project_folder(ctx)?;
+                // 상위 폴더에 .git이 있더라도 새 프로젝트 폴더가 독립된 저장소가 되도록 먼저 init한다.
+                let mut cmd = std::process::Command::new("git");
+                cmd.arg("-C").arg(&dir).arg("init");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000);
+                }
+                let _ = cmd.output();
+                dir.to_string_lossy().to_string()
+            } else {
+                raw_folder
+            };
+            let ws = gitops::prepare(&target_folder, &ctx.data_dir.join("worktrees"), &ctx.short_id(), ctx.b("allowInit", true))?;
+            let (is_greenfield, _) = workspace_files_summary(Path::new(&ws.path));
+            let mut note = if auto_folder {
+                format!("새 프로젝트 폴더({})를 자동 생성하고 작업 공간을 준비했습니다 · 브랜치 {}", ws.repo, ws.branch)
+            } else {
+                format!("작업 공간을 만들었습니다 · 브랜치 {} (기준 {})", ws.branch, ws.base_branch)
+            };
+            if ws.initialized && !auto_folder {
                 note.push_str(" · 새 저장소를 만들고 현재 상태를 첫 커밋으로 기록했습니다");
             }
             if ws.dirty_main {
                 note.push_str(" · 원래 폴더의 커밋하지 않은 변경은 이번 작업에 포함되지 않습니다");
             }
-            Ok(StepResult::new(json!({ "workspace": ws }), note))
+            Ok(StepResult::new(json!({ "workspace": ws, "autoFolder": auto_folder, "isGreenfield": is_greenfield }), note))
         }
         "merge" => {
             let ws = ctx.workspace()?;

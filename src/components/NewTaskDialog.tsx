@@ -14,15 +14,17 @@ import { useStore } from "../store";
 import { Avatar, Icon, Modal, StatusBadge } from "./ui";
 import { TaskForm, defaultValues, missingFields, type Values } from "./TaskForm";
 import { QuoteSheet, previewQuote } from "./QuoteSheet";
+import { OneLineAutoBox } from "./OneLineAutoBox";
 
 function Picker({ onPick }: { onPick: (e: Employee) => void }) {
   const { boot } = useStore();
   const groups: [string, Employee[]][] = [
-    ["개발팀 · 코드를 만드는 직원", (boot?.employees ?? []).filter((e) => isDev(e.id))],
-    ["사무팀 · 글·조사·견적·정리", (boot?.employees ?? []).filter((e) => !isDev(e.id))],
+    ["개발팀 · 코드를 만드는 직원 (직접 지정)", (boot?.employees ?? []).filter((e) => isDev(e.id))],
+    ["사무팀 · 글·조사·견적·정리 (직접 지정)", (boot?.employees ?? []).filter((e) => !isDev(e.id))],
   ];
   return (
     <>
+    <OneLineAutoBox compact />
     {groups.map(([title, list]) => (
     <section key={title} className="picker-group">
     <h3>{title}</h3>

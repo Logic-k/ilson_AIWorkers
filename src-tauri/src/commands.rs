@@ -375,11 +375,86 @@ pub fn finish_external(state: State<'_, AppState>, id: String) -> CmdResult<()> 
     Ok(())
 }
 
-/// 작업 공간 폴더 경로 (탐색기·IDE로 열기용).
+/// 작업 공간 폴더 경로 (탐색기·IDE로 열기용). 병합 후 worktree가 정리되었으면 실제 프로젝트 폴더(repo)를 돌려준다.
 #[tauri::command]
 pub fn task_workspace_path(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let conn = state.db.lock().unwrap();
-    Ok(task_workspace(&conn, &id)?.path)
+    let ws = task_workspace(&conn, &id)?;
+    if std::path::Path::new(&ws.path).exists() {
+        Ok(ws.path)
+    } else {
+        Ok(ws.repo)
+    }
+}
+
+/// 한줄 자동업무: 한 줄 지시를 분석해 가장 알맞은 직원·팀 파이프라인으로 자동 착수한다.
+#[tauri::command]
+pub fn create_auto_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    prompt: String,
+    folder: Option<String>,
+    force_program: Option<bool>,
+) -> CmdResult<Task> {
+    if prompt.trim().is_empty() {
+        return Err("만들고 싶은 프로그램이나 시키실 업무를 한 줄로 입력해 주세요.".into());
+    }
+    let (employee_id, title, input) = roster::route_one_line(
+        prompt.trim(),
+        folder.as_deref(),
+        force_program.unwrap_or(false),
+    );
+    {
+        let conn = state.db.lock().unwrap();
+        if let Ok(mut settings) = db::load_settings(&conn) {
+            let mut changed = false;
+            if settings.engine_mode != "auto" {
+                settings.engine_mode = "auto".into();
+                changed = true;
+            }
+            if !settings.auto_acks.get("opencode").is_some_and(|s| !s.trim().is_empty()) {
+                settings.auto_acks.insert("opencode".into(), "자동 실행 동의".into());
+                changed = true;
+            }
+            if changed {
+                let _ = db::save_settings(&conn, &settings);
+            }
+        }
+    }
+    create_task(app, state, employee_id, title, input)
+}
+
+/// 완성된 프로그램(index.html 등)이나 프로젝트 폴더를 즉시 실행한다.
+#[tauri::command]
+pub fn launch_project(path: String) -> CmdResult<()> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("실행할 파일이나 폴더를 찾을 수 없습니다: {path}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| format!("프로그램을 실행하지 못했습니다: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("프로그램을 실행하지 못했습니다: {e}"))?;
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("프로그램을 실행하지 못했습니다: {e}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

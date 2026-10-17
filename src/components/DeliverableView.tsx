@@ -136,10 +136,18 @@ export function DeliverableView({ task, result }: { task: Task; result: Delivera
     return (
       <div className="deliverable">
         <div className="deliverable__actions">
+          {result.entryHtml && (
+            <button
+              className="btn btn--primary btn--sm"
+              onClick={() => api.launchProject(result.entryHtml!).catch((e) => toast(errorText(e), "error"))}
+            >
+              <Icon name="spark" size={16} /> 🚀 완성된 프로그램 바로 실행
+            </button>
+          )}
           {result.merged ? (
             <span className="badge badge--positive">
               <i />
-              {result.workspace?.baseBranch ?? "원래 브랜치"}에 병합됨 · {result.mergeCommit}
+              {result.autoFolder ? "새 프로젝트 폴더에 착수·반영 완료" : `${result.workspace?.baseBranch ?? "원래 브랜치"}에 병합됨`} · {result.mergeCommit}
             </span>
           ) : (
             <span className="badge badge--neutral">
@@ -151,7 +159,7 @@ export function DeliverableView({ task, result }: { task: Task; result: Delivera
           {result.workspace?.repo && (
             <>
               <button className="btn btn--ghost btn--sm" onClick={() => revealItemInDir(result.workspace!.repo)}>
-                <Icon name="folder" size={16} /> 저장소 열기
+                <Icon name="folder" size={16} /> 프로젝트 폴더 열기
               </button>
               <button className="btn btn--ghost btn--sm" onClick={() => api.openTerminal(result.workspace!.repo).catch((e) => toast(errorText(e), "error"))}>
                 <Icon name="terminal" size={16} /> 터미널 열기
@@ -162,6 +170,18 @@ export function DeliverableView({ task, result }: { task: Task; result: Delivera
             <Icon name="download" size={16} /> 보고서 저장
           </button>
         </div>
+        {result.workspace?.repo && (
+          <div className="callout callout--info" style={{ marginBottom: 12, padding: "10px 14px" }}>
+            <div>
+              <strong>📁 프로젝트 저장 위치:</strong> <code>{result.workspace.repo}</code>
+              {result.entryHtml && (
+                <span style={{ marginLeft: 8, color: "var(--muted)" }}>
+                  (진입 파일: <code>{result.entryHtml.split(/[\\/]/).pop()}</code>)
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         {files.length > 0 && (
           <div className="code-summary">
             <strong>

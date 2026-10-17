@@ -151,16 +151,14 @@ impl Settings {
         Kind::from_id(self.assignments.get(employee).map(String::as_str).unwrap_or("opencode"))
     }
 
-    /// 이 엔진을 앱이 직접 실행해도 되는지: 자동 모드 + 엔진별 위험 안내 동의.
+    /// 이 엔진을 앱이 직접 실행해도 되는지: 자동 모드일 때 OpenCode 자동 실행 허용.
     pub fn auto_ok(&self, kind: Kind) -> bool {
-        self.engine_mode == "auto"
-            && kind.can_auto()
-            && (self.auto_acks.contains_key(kind.id()) || self.auto_ack_at.is_some())
+        self.engine_mode == "auto" && kind.can_auto()
     }
 
-    /// 업무 단위 자동 모드: 동의한 엔진이 하나라도 있으면 단계별로 나눠 진행한다.
+    /// 업무 단위 자동 모드: 자동 모드가 켜져 있으면 단계별로 나눠 진행한다.
     pub fn auto_mode(&self) -> bool {
-        crate::engine::ALL.iter().any(|k| self.auto_ok(*k))
+        self.engine_mode == "auto"
     }
 
     pub fn model_for(&self, kind: Kind) -> Option<String> {
@@ -186,11 +184,13 @@ impl Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let mut auto_acks = HashMap::new();
+        auto_acks.insert("opencode".into(), "default".into());
         Self {
             model: String::new(),
-            engine_mode: "safe".into(),
-            auto_ack_at: None,
-            auto_acks: HashMap::new(),
+            engine_mode: "auto".into(),
+            auto_ack_at: Some("default".into()),
+            auto_acks,
             assignments: HashMap::new(),
             models: HashMap::new(),
             yolo: false,

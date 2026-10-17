@@ -187,6 +187,8 @@ export type Deliverable =
       commits?: string[] | null;
       verdict?: string | null;
       workspace?: { repo: string; branch: string; baseBranch: string; path: string } | null;
+      autoFolder?: boolean | null;
+      entryHtml?: string | null;
     }
   | {
       kind: "organize";
@@ -433,6 +435,9 @@ export const api = {
   markTaskSeen: (id: string) => invoke<void>("mark_task_seen", { id }),
   createTask: (employeeId: string, title: string, input: Record<string, unknown>) =>
     invoke<Task>("create_task", { employeeId, title, input }),
+  createAutoTask: (prompt: string, folder?: string, forceProgram?: boolean) =>
+    invoke<Task>("create_auto_task", { prompt, folder, forceProgram }),
+  launchProject: (path: string) => invoke<void>("launch_project", { path }),
   approveTask: (id: string) => invoke<void>("approve_task", { id }),
   declineTask: (id: string) => invoke<void>("decline_task", { id }),
   pauseTask: (id: string) => invoke<void>("pause_task", { id }),

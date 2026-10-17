@@ -71,6 +71,8 @@ pub fn run() {
             commands::get_task,
             commands::mark_task_seen,
             commands::create_task,
+            commands::create_auto_task,
+            commands::launch_project,
             commands::approve_task,
             commands::decline_task,
             commands::pause_task,
