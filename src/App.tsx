@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { StoreProvider, useStore, type Route } from "./store";
 import { Icon } from "./components/ui";
 import { NewTaskDialog } from "./components/NewTaskDialog";
@@ -19,6 +22,78 @@ const nav: { id: Route; label: string; description: string; icon: string }[] = [
   { id: "connections", label: "연결 및 설정", description: "OpenCode 연결, 실행 방식, 사업장 정보", icon: "link" },
   { id: "help", label: "도움말", description: "일하는 방식과 자주 묻는 질문", icon: "help" },
 ];
+
+function UpdaterWidget() {
+  const { toast } = useStore();
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+
+  const checkForUpdate = async (silent = false) => {
+    setChecking(true);
+    try {
+      const found = await check();
+      if (found) {
+        setUpdate(found);
+        if (!silent) {
+          toast(`새 버전(v${found.version})이 있습니다!`, "info");
+        }
+      } else if (!silent) {
+        toast("현재 최신 버전을 사용 중입니다.", "success");
+      }
+    } catch {
+      if (!silent) {
+        toast("아직 배포된 업데이트가 없거나 확인하지 못했습니다.", "info");
+      }
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    checkForUpdate(true);
+  }, []);
+
+  const installUpdate = async () => {
+    if (!update) return;
+    setInstalling(true);
+    try {
+      toast(`v${update.version} 무설치 업데이트를 내려받는 중…`, "info");
+      await update.downloadAndInstall();
+      await relaunch();
+    } catch (e) {
+      toast(`업데이트 실패: ${e instanceof Error ? e.message : String(e)}`, "error");
+      setInstalling(false);
+    }
+  };
+
+  if (update) {
+    return (
+      <button
+        type="button"
+        className="btn btn--primary btn--sm"
+        style={{ width: "100%", justifyContent: "center", marginBottom: 6 }}
+        disabled={installing}
+        onClick={installUpdate}
+      >
+        <Icon name="spark" size={14} />
+        {installing ? "업데이트 적용 중…" : `⬆️ v${update.version} 무설치 업데이트`}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="link-btn"
+      style={{ fontSize: 11.5, marginBottom: 4 }}
+      disabled={checking}
+      onClick={() => checkForUpdate(false)}
+    >
+      <Icon name="refresh" size={12} /> {checking ? "확인 중…" : "업데이트 확인"}
+    </button>
+  );
+}
 
 function Shell() {
   const { route, navigate, tasks, newTask, toasts, boot } = useStore();
@@ -60,6 +135,7 @@ function Shell() {
               <i /> {running}건 처리 중
             </p>
           )}
+          <UpdaterWidget />
           <small>v{boot?.version ?? ""} · OpenCode 자동화</small>
         </div>
       </aside>

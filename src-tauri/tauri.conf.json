@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "일손",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "kr.ilson.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,12 +21,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com",
       "devCsp": null
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis",
       "dmg",
@@ -43,6 +44,17 @@
     ],
     "shortDescription": "사장님 대신 일하는 AI 직원 사무소",
     "category": "Productivity"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMzNjUyMEQ2MDVDMEE1QUUKUldTdXBjQUYxaUJsTXdxYXRSamJETjFSVWwxV2tBWjJwY0d6UXdXaUxwek5vdlVwWU83c0NCRHMK",
+      "endpoints": [
+        "https://github.com/Logic-k/ilson_AIWorkers/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   },
   "mainBinaryName": "ilson"
 }
