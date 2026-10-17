@@ -11,12 +11,13 @@ import {
   shortModelLabel,
   won,
   type DiffSummary,
+  type StepOutput,
   type Task,
   type TaskStatus,
   type UsageRow,
 } from "../api";
 import { useStore } from "../store";
-import { Avatar, Empty, Icon, StatusBadge, TokenChip } from "../components/ui";
+import { Avatar, Empty, Icon, Markdown, StatusBadge, TokenChip } from "../components/ui";
 import { DeliverableView } from "../components/DeliverableView";
 
 const tabs: { id: string; label: string; match: TaskStatus[] }[] = [
@@ -26,6 +27,16 @@ const tabs: { id: string; label: string; match: TaskStatus[] }[] = [
   { id: "stopped", label: "멈춤·실패", match: ["paused", "failed", "cancelled"] },
   { id: "done", label: "완료", match: ["completed"] },
 ];
+
+const STEP_ACTOR_FALLBACK: Record<string, string> = {
+  research: "seojin",
+  plan: "taeo",
+  backend: "geonwoo",
+  frontend: "yuna",
+  test: "sohee",
+  review: "minhyuk",
+  report: "taeo",
+};
 
 function DiffViewer({ taskId }: { taskId: string }) {
   const [diff, setDiff] = useState<DiffSummary | null>(null);
@@ -65,9 +76,18 @@ function TaskDetail({ id }: { id: string }) {
   const { employee, lastEvent, toast, refresh, newTask, navigate, activities } = useStore();
   const [task, setTask] = useState<Task | null>(null);
   const [usages, setUsages] = useState<UsageRow[]>([]);
+  const [stepOutputs, setStepOutputs] = useState<StepOutput[]>([]);
+  const [selectedStepKey, setSelectedStepKey] = useState<string | null>(null);
+  const [followupPrompt, setFollowupPrompt] = useState("");
+  const [submittingFollowup, setSubmittingFollowup] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [detailTab, setDetailTab] = useState<"deliverable" | "evidence" | "diff" | "tokens" | "timeline">("deliverable");
+
+  useEffect(() => {
+    setSelectedStepKey(null);
+    setFollowupPrompt("");
+  }, [id]);
 
   useEffect(() => {
     let alive = true;
@@ -78,6 +98,7 @@ function TaskDetail({ id }: { id: string }) {
       }
     }).catch(() => alive && setTask(null));
     api.usageForTask(id).then((u) => alive && setUsages(u)).catch(() => alive && setUsages([]));
+    api.taskStepOutputs(id).then((outs) => alive && setStepOutputs(outs)).catch(() => alive && setStepOutputs([]));
     return () => {
       alive = false;
     };
@@ -106,12 +127,62 @@ function TaskDetail({ id }: { id: string }) {
   const safe = task.input._engine !== "auto";
   const stepDef = e?.steps.find((s) => s.label === task.currentStep);
   const watching = safe && task.status === "running" && stepDef?.gate === "handoff";
-  const live = task.currentActor ? activities[task.currentActor] : undefined;
+  const liveByActor = task.currentActor ? activities[task.currentActor] : undefined;
+  const liveForTask = Object.values(activities).find((a) => a.taskId === task.id);
+  const live = liveByActor && liveByActor.taskId === task.id ? liveByActor : liveForTask;
+  const activeActorEmp = employee(live?.employeeId ?? task.currentActor ?? task.employeeId);
   const isCode = isDev(task.employeeId);
+
+  const outputFolder =
+    (task.result?.kind === "code" ? task.result.workspace?.repo : undefined) ||
+    (task.result?.kind === "organize" ? task.result.folder : undefined) ||
+    (typeof task.input.folder === "string" && task.input.folder.trim() ? task.input.folder.trim() : undefined);
+
+  const entryHtml = task.result?.kind === "code" ? task.result.entryHtml : undefined;
+  const followupRound = Number(task.input._followupRound ?? 1);
+  const followupHistory = Array.isArray(task.input._followupHistory)
+    ? (task.input._followupHistory as { round?: number; prompt?: string; at?: string }[])
+    : [];
+
+  const selectedStepOutput = stepOutputs.find((o) => o.key === selectedStepKey);
+
   const copy = async (text: string, msg: string) => {
     await navigator.clipboard.writeText(text);
     toast(msg, "success");
   };
+
+  const handleFollowupSubmit = async () => {
+    const trimmed = followupPrompt.trim();
+    if (!trimmed) {
+      toast("추가로 지시할 업무 내용을 입력해 주세요.", "error");
+      return;
+    }
+    setSubmittingFollowup(true);
+    try {
+      const updated = await api.followupTask(task.id, trimmed);
+      setTask(updated);
+      setFollowupPrompt("");
+      toast("추가 업무를 배정하고 같은 작업 공간에서 바로 이어서 시작했습니다!", "success");
+      await refresh();
+    } catch (err) {
+      toast(errorText(err), "error");
+    } finally {
+      setSubmittingFollowup(false);
+    }
+  };
+
+  const followupSuggestions = isCode
+    ? [
+        "다크 모드와 테마 색상 전환 기능 추가해줘",
+        "UI 디자인을 더 세련되게 다듬고 애니메이션 효과 넣어줘",
+        "키보드 단축키와 데이터 내보내기·저장 기능 추가해줘",
+        "버그나 레이아웃 깨짐 없는지 점검하고 반응형 보강해줘",
+      ]
+    : [
+        "상단에 핵심 요약 표와 실행 체크리스트를 추가해줘",
+        "구체적인 수치와 실제 활용 예시를 더 풍부하게 보강해줘",
+        "고객에게 바로 보낼 수 있게 말투를 더 정중하고 설득력 있게 다듬어줘",
+      ];
 
   return (
     <article className="detail task-detail">
@@ -123,6 +194,7 @@ function TaskDetail({ id }: { id: string }) {
           </span>
           <StatusBadge task={task.status} />
           <span className="tag">{safe ? "안전 모드" : "자동 모드"}</span>
+          {followupRound > 1 && <span className="tag" style={{ background: "rgba(37,99,235,0.12)", color: "#1d4ed8", fontWeight: 700 }}>{followupRound}차 연속 작업</span>}
         </div>
         <h2>{task.title}</h2>
         <p>
@@ -146,17 +218,145 @@ function TaskDetail({ id }: { id: string }) {
         )}
       </header>
 
-      {["running", "queued", "awaiting_approval"].includes(task.status) && (
-        <div className="progress">
-          <div className="progress__bar">
-            <i style={{ width: `${task.progress}%` }} />
+      {/* ───────── 실시간 AI 협업 스튜디오 (OpenHands / ChatDev 스타일 워크스테이션) ───────── */}
+      <section className={`live-studio ${task.status === "running" ? "is-running" : ""}`}>
+        <div className="live-studio__head">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className={`live-studio__dot ${task.status === "running" ? "is-on" : ""}`} />
+            <strong>⚡ 실시간 AI 협업 워크스테이션</strong>
+            <span className="live-studio__sub">
+              {task.status === "running"
+                ? `${activeActorEmp?.name ?? "직원"}(${activeActorEmp?.role ?? "담당"})님이 작업 중 · ${task.progress}%`
+                : `진행률 ${task.progress}% · 완료된 단계 카드를 누르면 중간 산출물을 바로 열어볼 수 있습니다`}
+            </span>
           </div>
-          <span>
-            {task.currentStep ?? "준비 중"} · {task.progress}%
-            {task.status === "running" && live && live.taskId === task.id && ` · ${employee(live.employeeId)?.name ?? ""}: ${live.label}`}
-          </span>
+          {outputFolder && (
+            <button className="btn btn--ghost btn--sm" onClick={() => revealItemInDir(outputFolder)}>
+              <Icon name="folder" size={14} /> 작업 폴더 열기
+            </button>
+          )}
         </div>
-      )}
+
+        {/* SOP 릴레이 파이프라인 바 */}
+        <div className="sop-relay">
+          {task.steps.map((s, idx) => {
+            const actorId = e?.steps.find((es) => es.key === s.key)?.actor ?? STEP_ACTOR_FALLBACK[s.key] ?? task.employeeId;
+            const stepEmp = employee(actorId);
+            const hasOutput = stepOutputs.some((o) => o.key === s.key);
+            const isSelected = selectedStepKey === s.key;
+            return (
+              <button
+                key={s.key}
+                type="button"
+                className={`sop-node sop-node--${s.status} ${isSelected ? "is-selected" : ""} ${hasOutput ? "has-output" : ""}`}
+                onClick={() => {
+                  if (hasOutput) {
+                    setSelectedStepKey(isSelected ? null : s.key);
+                  } else if (s.note) {
+                    toast(`${s.label}: ${s.note}`, "info");
+                  }
+                }}
+                title={hasOutput ? "클릭하여 이 단계의 산출물 보기" : s.note ?? s.label}
+              >
+                <div className="sop-node__top">
+                  <span className="sop-node__idx">STEP {idx + 1}</span>
+                  <span className={`sop-node__status sop-node__status--${s.status}`}>
+                    {s.status === "done" ? "✓ 완료" : s.status === "running" ? "● 작업 중" : s.status === "failed" ? "✕ 실패" : "대기"}
+                  </span>
+                </div>
+                <strong className="sop-node__title">{s.label}</strong>
+                <div className="sop-node__who">
+                  <Avatar employee={stepEmp} size={18} />
+                  <span>{stepEmp?.name ?? actorId}</span>
+                  {hasOutput && <em className="sop-node__doc-badge">📄 문서 보기</em>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* 단계별 산출물 실시간 프리뷰 패널 */}
+        {selectedStepOutput && (
+          <div className="sop-preview">
+            <header className="sop-preview__head">
+              <strong>📄 {selectedStepOutput.title}</strong>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="btn btn--ghost btn--sm" onClick={() => copy(selectedStepOutput.markdown, "단계 산출물을 복사했습니다.")}>
+                  <Icon name="copy" size={13} /> 복사
+                </button>
+                <button className="btn btn--ghost btn--sm" onClick={() => setSelectedStepKey(null)}>
+                  닫기
+                </button>
+              </div>
+            </header>
+            <div className="sop-preview__body">
+              <Markdown text={selectedStepOutput.markdown} />
+            </div>
+          </div>
+        )}
+
+        {/* 실시간 에이전트 터미널 & 팀 인계 피드 (진행 중이거나 최근 활동이 있을 때 표시) */}
+        {(task.status === "running" || task.status === "queued" || task.events.length > 0) && (
+          <div className="live-studio__grid">
+            <div className="live-terminal">
+              <div className="live-terminal__bar">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Avatar employee={activeActorEmp} size={22} />
+                  <strong>{activeActorEmp?.name ?? "AI 직원"}</strong>
+                  <small>{activeActorEmp?.role}</small>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {live?.tool && <span className="live-terminal__tool">[{live.tool.toUpperCase()}]</span>}
+                  <span className="live-terminal__kind">
+                    {task.status === "running"
+                      ? live?.kind === "typing"
+                        ? "✍️ 코드·문서 작성 중"
+                        : live?.kind === "running"
+                          ? "⚙️ 명령·검증 실행 중"
+                          : live?.kind === "reading"
+                            ? "🔍 파일·웹 분석 중"
+                            : "🧠 설계·추론 중"
+                      : task.status === "completed"
+                        ? "✅ 작업 완료"
+                        : "⏸ 대기 중"}
+                  </span>
+                </div>
+              </div>
+              <div className="live-terminal__status">
+                {task.status === "running" && live ? live.label : task.currentStep ?? "모든 단계가 처리되었습니다."}
+              </div>
+              <pre className="live-terminal__screen">
+                {live?.detail
+                  ? live.detail
+                  : task.status === "running"
+                    ? `> OpenCode 에이전트(${activeActorEmp?.name ?? ""})가 '${task.currentStep ?? "현재 단계"}' 작업을 수행하고 있습니다...\n> 파일 작성·수정 또는 추론 결과가 나오는 즉시 이 화면에 실시간 스트리밍됩니다.`
+                    : task.steps
+                        .filter((s) => s.note)
+                        .map((s) => `[${s.label}] ${s.note}`)
+                        .join("\n") || "작업 완료 후 아래 결과물 탭에서 전체 산출물을 확인하거나, 추가 업무 지시를 내릴 수 있습니다."}
+              </pre>
+            </div>
+
+            <div className="live-handoffs">
+              <div className="live-handoffs__head">
+                <strong>💬 팀 협업 인계 & 실시간 작업 로그</strong>
+                <small>최근 {Math.min(task.events.length, 8)}건</small>
+              </div>
+              <ul className="live-handoffs__list">
+                {task.events.slice(-8).reverse().map((ev, i) => {
+                  const isHandoff = ev.message.includes("[업무 인계]") || ev.message.includes("[추가 업무 지시");
+                  return (
+                    <li key={i} className={`live-handoffs__item ${isHandoff ? "is-handoff" : `is-${ev.level}`}`}>
+                      <time>{new Date(ev.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                      <span>{ev.message}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+        )}
+      </section>
 
       {task.status === "awaiting_approval" && gate && gate.kind === "handoff" && (
         <section className="gate-card gate-card--handoff">
@@ -262,7 +462,85 @@ function TaskDetail({ id }: { id: string }) {
         </section>
       )}
 
+      {/* ───────── 세션 내 연속 추가 업무 지시 카드 (Item #1) ───────── */}
+      {!["running", "queued"].includes(task.status) && (
+        <section className="followup-box">
+          <div className="followup-box__head">
+            <div>
+              <span className="eyebrow">연속 세션 · OpenCode 자동 담당자 배정</span>
+              <h3>💬 이 작업 결과물에 바로 추가 업무 지시하기 ({followupRound + 1}차 작업)</h3>
+              <p>
+                새로 처음부터 만들지 않고, <strong>현재 만들어진 폴더와 파일 위에서 그대로 이어서</strong> 기능 추가·수정·개선을 수행합니다. 지시 내용을 분석해 OpenCode가 필요한 직원(기획·UI·로직·QA 등)만 자동으로 투입하고 제목을 갱신합니다.
+              </p>
+            </div>
+          </div>
+
+          {followupHistory.length > 0 && (
+            <div className="followup-box__history">
+              <strong>이전 연속 지시 내역:</strong>
+              <ul>
+                {followupHistory.map((h, i) => (
+                  <li key={i}>
+                    <span className="badge badge--neutral">{h.round ?? i + 2}차</span> {h.prompt}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="followup-box__chips">
+            {followupSuggestions.map((sug) => (
+              <button
+                key={sug}
+                type="button"
+                className="chip"
+                onClick={() => setFollowupPrompt(sug)}
+              >
+                + {sug}
+              </button>
+            ))}
+          </div>
+
+          <div className="followup-box__form">
+            <textarea
+              rows={2}
+              value={followupPrompt}
+              onChange={(ev) => setFollowupPrompt(ev.target.value)}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+                  ev.preventDefault();
+                  handleFollowupSubmit();
+                }
+              }}
+              placeholder="예: 다크모드 버튼을 헤더 오른쪽에 추가하고, 단축키 Ctrl+S로 저장되게 고쳐줘 (Ctrl+Enter로 바로 지시)"
+            />
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={submittingFollowup || !followupPrompt.trim()}
+              onClick={handleFollowupSubmit}
+            >
+              <Icon name="spark" size={16} />
+              {submittingFollowup ? "배정 중…" : "이어서 업무 시작"}
+            </button>
+          </div>
+        </section>
+      )}
+
       <div className="task-detail__actions">
+        {entryHtml && (
+          <button
+            className="btn btn--primary btn--sm"
+            onClick={() => act(() => api.launchProject(entryHtml), "만들어진 프로그램을 실행했습니다.")}
+          >
+            <Icon name="play" size={16} /> 프로그램 바로 실행
+          </button>
+        )}
+        {outputFolder && (
+          <button className="btn btn--ghost btn--sm" onClick={() => revealItemInDir(outputFolder)}>
+            <Icon name="folder" size={16} /> 산출물 폴더 열기
+          </button>
+        )}
         {task.status === "running" && (
           <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => act(() => api.pauseTask(task.id), "멈춤을 요청했습니다.")}>
             <Icon name="pause" size={16} /> 멈추기

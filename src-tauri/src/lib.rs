@@ -98,6 +98,13 @@ pub fn run() {
             commands::estimate_task,
             commands::quota_status,
             commands::refresh_fx,
+            commands::task_step_outputs,
+            commands::followup_task,
+            commands::list_skill_catalog,
+            commands::import_skill_from_url,
+            commands::hire_employee,
+            commands::dismiss_employee,
+            commands::save_employee_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

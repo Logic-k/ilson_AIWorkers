@@ -75,6 +75,11 @@ export interface Employee {
   availability: { status: EmployeeStatus; missing: string[]; guard?: string };
   /** AI를 쓰는 직원의 담당 구독 엔진 */
   engine?: { id: EngineId; label: string; auto: boolean; model?: string; free?: boolean };
+  custom?: boolean;
+  floor?: "dev" | "office";
+  skillMarkdown?: string;
+  sourceUrl?: string;
+  equippedSkill?: string;
 }
 
 export type EngineId = "opencode";
@@ -234,6 +239,8 @@ export interface Settings {
   brandKeywords: string;
   bannedWords: string;
   sampleText: string;
+  autoOpenFolder?: boolean;
+  customSkills?: Record<string, string>;
 }
 
 export interface ModelInfo {
@@ -260,8 +267,52 @@ export interface Activity {
   employeeId: string;
   kind: "typing" | "reading" | "running" | "thinking" | "talking";
   label: string;
+  detail?: string;
+  tool?: string;
   engine?: EngineId;
   at: string;
+}
+
+export interface StepOutput {
+  key: string;
+  title: string;
+  markdown: string;
+}
+
+export interface SkillCatalogItem {
+  id: string;
+  name: string;
+  role: string;
+  team: string;
+  floor: "dev" | "office";
+  hue: number;
+  summary: string;
+  motto: string;
+  capabilities: string[];
+  sourceUrl: string;
+  skillMarkdown: string;
+}
+
+export interface ImportedSkill {
+  name: string;
+  role: string;
+  summary: string;
+  skillMarkdown: string;
+  sourceUrl: string;
+}
+
+export interface CustomEmployeeInput {
+  id?: string;
+  name: string;
+  role: string;
+  team: string;
+  hue?: number;
+  floor: "dev" | "office";
+  summary: string;
+  motto: string;
+  capabilities: string[];
+  skillMarkdown: string;
+  sourceUrl?: string;
 }
 
 export interface DiffSummary {
@@ -437,6 +488,14 @@ export const api = {
     invoke<Task>("create_task", { employeeId, title, input }),
   createAutoTask: (prompt: string, folder?: string, forceProgram?: boolean) =>
     invoke<Task>("create_auto_task", { prompt, folder, forceProgram }),
+  followupTask: (id: string, prompt: string) => invoke<Task>("followup_task", { id, prompt }),
+  taskStepOutputs: (id: string) => invoke<StepOutput[]>("task_step_outputs", { id }),
+  listSkillCatalog: () => invoke<SkillCatalogItem[]>("list_skill_catalog"),
+  importSkillFromUrl: (url: string) => invoke<ImportedSkill>("import_skill_from_url", { url }),
+  hireEmployee: (employee: CustomEmployeeInput) => invoke<Employee>("hire_employee", { employee }),
+  dismissEmployee: (id: string) => invoke<void>("dismiss_employee", { id }),
+  saveEmployeeSkill: (employeeId: string, skillMarkdown: string) =>
+    invoke<void>("save_employee_skill", { employeeId, skillMarkdown }),
   launchProject: (path: string) => invoke<void>("launch_project", { path }),
   approveTask: (id: string) => invoke<void>("approve_task", { id }),
   declineTask: (id: string) => invoke<void>("decline_task", { id }),
@@ -469,7 +528,7 @@ export function errorText(e: unknown): string {
 }
 
 export const DEV_TEAM = ["taeo", "yuna", "geonwoo", "sohee", "minhyuk", "daeun"];
-export const isDev = (id: string) => DEV_TEAM.includes(id);
+export const isDev = (id: string) => DEV_TEAM.includes(id) || id.startsWith("custom_dev_");
 
 export const won = (n: number) => `${Math.round(n).toLocaleString("ko-KR")}원`;
 

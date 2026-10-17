@@ -54,12 +54,32 @@ fn pause(app: &AppHandle, task_id: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
+fn open_folder_in_os(path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || !std::path::Path::new(trimmed).exists() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(trimmed).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(trimmed).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(trimmed).spawn();
+    }
+}
+
 async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Result<()> {
     let state = app.state::<AppState>();
-    let (task, settings, saved) = {
+    let (task, settings, custom_employees, saved) = {
         let conn = state.db.lock().unwrap();
         let task = db::get_task(&conn, task_id)?;
         let settings = db::load_settings(&conn)?;
+        let custom_employees = db::load_custom_employees(&conn).unwrap_or_default();
         let saved = db::step_outputs(&conn, task_id)?;
         let resumed = saved.iter().any(|(_, st, _)| st == "done");
         db::set_status(&conn, task_id, status::RUNNING)?;
@@ -67,9 +87,9 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
             &conn,
             task_id,
             "info",
-            if resumed { "마지막으로 끝낸 단계 다음부터 이어서 진행합니다." } else { "업무를 시작합니다." },
+            if resumed { "🔄 이전 작업 맥락을 이어받아 다음 단계부터 진행합니다." } else { "🚀 업무 세션을 시작합니다." },
         )?;
-        (task, settings, saved)
+        (task, settings, custom_employees, saved)
     };
     emit(app, task_id);
 
@@ -82,6 +102,7 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
         input: task.input.clone(),
         outputs: HashMap::new(),
         settings: settings.clone(),
+        custom_employees,
         http: state.http.clone(),
     };
     for (key, st, out) in saved {
@@ -93,9 +114,16 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
     let safe = task.input["_engine"] != "auto";
     let steps = roster::steps(&task.employee_id, safe);
     let total = steps.len().max(1) as i64;
+    let mut prev_actor: Option<String> = None;
+    let mut prev_label: Option<String> = None;
+
     for (i, step) in steps.iter().enumerate() {
         let i = i as i64;
-        if ctx.outputs.contains_key(step.key) {
+        if let Some(existing) = ctx.outputs.get(step.key) {
+            if existing["skipped"] != true {
+                prev_actor = Some(roster::actor_of(&task.employee_id, step.key, safe));
+                prev_label = Some(step.label.to_string());
+            }
             continue;
         }
         if flag.load(Ordering::SeqCst) {
@@ -146,11 +174,25 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
             }
         }
 
+        let curr_actor = roster::actor_of(&task.employee_id, step.key, safe);
         {
             let conn = state.db.lock().unwrap();
             db::step_started(&conn, task_id, step.key)?;
-            db::set_actor(&conn, task_id, Some(&roster::actor_of(&task.employee_id, step.key, safe)))?;
+            db::set_actor(&conn, task_id, Some(&curr_actor))?;
             db::set_progress(&conn, task_id, (i * 100 / total).max(3), Some(step.label))?;
+            if let Some(ref p_actor) = prev_actor {
+                if p_actor != &curr_actor && step.key != "deliver" {
+                    let from_name = ctx.name_of(p_actor);
+                    let to_name = ctx.name_of(&curr_actor);
+                    let from_step = prev_label.as_deref().unwrap_or("이전 단계");
+                    let _ = db::add_event(
+                        &conn,
+                        task_id,
+                        "info",
+                        &format!("💬 [업무 인계] {from_name} → {to_name}: ‘{from_step}’ 산출물을 전달받아 ‘{}’ 작업에 착수합니다.", step.label),
+                    );
+                }
+            }
         }
         emit(app, task_id);
 
@@ -182,16 +224,22 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
 
         match outcome {
             Ok(r) => {
+                let skipped_step = r.output["skipped"] == true;
                 let conn = state.db.lock().unwrap();
                 db::step_done(&conn, task_id, step.key, &r.output, r.note.as_deref())?;
                 if r.cost_usd > 0.0 {
                     db::add_cost(&conn, task_id, r.cost_usd)?;
                 }
                 if let Some(note) = &r.note {
-                    db::add_event(&conn, task_id, "info", &format!("{} · {}", step.label, note))?;
+                    let actor_name = ctx.name_of(&curr_actor);
+                    db::add_event(&conn, task_id, "info", &format!("✓ [{actor_name} · {}] {note}", step.label))?;
                 }
                 db::set_progress(&conn, task_id, (i + 1) * 100 / total, Some(step.label))?;
                 ctx.outputs.insert(step.key.to_string(), r.output);
+                if !skipped_step {
+                    prev_actor = Some(curr_actor);
+                    prev_label = Some(step.label.to_string());
+                }
             }
             Err(e) => {
                 let conn = state.db.lock().unwrap();
@@ -203,9 +251,37 @@ async fn run_inner(app: &AppHandle, task_id: &str, flag: &Arc<AtomicBool>) -> Re
     }
 
     let result = ctx.outputs.get("deliver").cloned().unwrap_or(Value::Null);
-    let conn = state.db.lock().unwrap();
-    db::finish(&conn, task_id, &result)?;
-    db::add_event(&conn, task_id, "success", "업무를 마쳤습니다. 결과를 확인해 주세요.")?;
-    db::clear_guard(&conn, &task.employee_id)?;
+    let auto_folder_target = result["workspace"]["repo"]
+        .as_str()
+        .or_else(|| result["folder"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    {
+        let conn = state.db.lock().unwrap();
+        db::finish(&conn, task_id, &result)?;
+        if ctx.settings.auto_open_folder {
+            if let Some(ref folder) = auto_folder_target {
+                db::add_event(
+                    &conn,
+                    task_id,
+                    "success",
+                    &format!("📂 업무 완료! 산출물이 저장된 폴더를 자동으로 열었습니다: {folder}"),
+                )?;
+            } else {
+                db::add_event(&conn, task_id, "success", "업무를 마쳤습니다. 결과를 확인해 주세요.")?;
+            }
+        } else {
+            db::add_event(&conn, task_id, "success", "업무를 마쳤습니다. 결과를 확인해 주세요.")?;
+        }
+        db::clear_guard(&conn, &task.employee_id)?;
+    }
+
+    if ctx.settings.auto_open_folder {
+        if let Some(folder) = auto_folder_target {
+            open_folder_in_os(&folder);
+        }
+    }
     Ok(())
 }

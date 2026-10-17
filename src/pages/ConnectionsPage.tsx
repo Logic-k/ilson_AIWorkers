@@ -236,6 +236,17 @@ export function ConnectionsPage() {
             <small>자동 모드에서 파일을 고치는 단계는 모든 확인을 생략합니다(각 CLI의 dangerously-skip / bypass 옵션). 별도 작업 공간에서 일하고 병합은 여전히 사장님 확인을 받지만, 명령이 샌드박스 없이 실행될 수 있습니다.</small>
           </span>
         </label>
+        <label className={`yolo ${s.autoOpenFolder !== false ? "is-on" : ""}`} style={{ marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={s.autoOpenFolder !== false}
+            onChange={(e) => saveAll({ ...s, autoOpenFolder: e.target.checked })}
+          />
+          <span>
+            <strong>작업 완료 후 산출물 폴더 자동으로 띄우기</strong>
+            <small>원클릭 자동업무나 개발·문서 작업이 완료되면, 결과물이 저장된 폴더를 윈도우 탐색기로 즉시 열어 직접 폴더를 찾는 번거로움을 없앱니다.</small>
+          </span>
+        </label>
       </section>
 
       <section className="card">

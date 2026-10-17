@@ -487,16 +487,51 @@ pub struct RunOptions<'a> {
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
-    /// typing | reading | running | thinking | talking
+    /// typing | reading | running | talking | thinking
     pub kind: String,
     pub label: String,
-    /// 기록에 남길 만한 단계인지 (파일 수정·명령 실행)
+    /// 기록에 남길 만한 단계인지 (파일 수정·명령 실행·웹 검색)
     pub notable: bool,
+    /// 실시간 작업실 모니터에 표시할 사고 과정·작성 중 텍스트·도구 입출력 스니펫
+    pub detail: Option<String>,
+    /// 호출된 도구 이름 (edit, write, bash, read, websearch 등)
+    pub tool: Option<String>,
 }
 
 impl Activity {
     pub fn new(kind: &str, label: impl Into<String>, notable: bool) -> Self {
-        Self { kind: kind.into(), label: label.into(), notable }
+        Self {
+            kind: kind.into(),
+            label: label.into(),
+            notable,
+            detail: None,
+            tool: None,
+        }
+    }
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        let d = detail.into();
+        if !d.trim().is_empty() {
+            self.detail = Some(d);
+        }
+        self
+    }
+    pub fn with_tool(mut self, tool: impl Into<String>) -> Self {
+        let t = tool.into();
+        if !t.trim().is_empty() {
+            self.tool = Some(t);
+        }
+        self
+    }
+}
+
+fn tail_chars(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    let count = trimmed.chars().count();
+    if count <= max_chars {
+        trimmed.to_string()
+    } else {
+        let skipped: String = trimmed.chars().skip(count - max_chars).collect();
+        format!("…{skipped}")
     }
 }
 
@@ -539,24 +574,38 @@ fn param_hint(params: &Value) -> Option<String> {
 }
 
 /// 도구 이름을 사무실 화면의 동작으로 바꾼다.
-fn tool_activity(name: &str, params: &Value, done: bool) -> Activity {
+fn tool_activity(name: &str, params: &Value, state: &Value, done: bool) -> Activity {
     let hint = param_hint(params).unwrap_or_default();
     let n = name.to_lowercase();
     let (kind, verb) = if ["write", "edit", "replace", "sed_file", "notebook", "apply_patch", "file_change", "fs_write"].iter().any(|k| n.contains(k)) {
-        ("typing", "고치는 중")
+        ("typing", "파일 작성·수정")
     } else if ["bash", "run_command", "command", "shell", "exec", "execute_bash"].iter().any(|k| n.contains(k)) {
-        ("running", "명령 실행")
+        ("running", "터미널 명령 실행")
     } else if n.contains("search_web") || n.contains("websearch") || n.contains("web_search") {
-        ("reading", "웹 검색")
+        ("reading", "웹 실시간 검색")
     } else if n.contains("url") || n.contains("fetch") || n.contains("browser") {
-        ("reading", "웹 페이지 읽기")
+        ("reading", "웹 문서 분석")
     } else if ["subagent", "task", "agent", "send_message"].iter().any(|k| n.contains(k)) {
-        ("talking", "동료와 상의")
+        ("talking", "동료 에이전트 협업")
+    } else if ["read", "glob", "grep", "list", "view"].iter().any(|k| n.contains(k)) {
+        ("reading", "코드·파일 탐색")
     } else {
         ("reading", "살펴보는 중")
     };
-    let notable = done && matches!(kind, "typing" | "running");
+    let notable = done && (matches!(kind, "typing" | "running" | "talking") || !hint.is_empty());
+    let mut detail_parts = Vec::new();
+    if !hint.is_empty() {
+        detail_parts.push(format!("$ {name} → {hint}"));
+    }
+    if let Some(out) = state["output"].as_str().or_else(|| state["title"].as_str()) {
+        let preview = tail_chars(out, 320);
+        if !preview.is_empty() {
+            detail_parts.push(preview);
+        }
+    }
     Activity::new(kind, if hint.is_empty() { verb.to_string() } else { format!("{verb} · {hint}") }, notable)
+        .with_tool(name)
+        .with_detail(detail_parts.join("\n"))
 }
 
 /// OpenCode 스트림 출력을 읽어 진행 상황과 결과를 모은다.
@@ -565,6 +614,7 @@ struct Collector {
     out: RunResult,
     status: Option<Result<(), String>>,
     step_buf: String,
+    reasoning_buf: String,
     all_text: String,
     seen_step_ids: HashSet<String>,
     cost_accum: f64,
@@ -613,9 +663,10 @@ impl Collector {
         match ev["type"].as_str() {
             Some("step_start") => {
                 self.step_buf.clear();
+                self.reasoning_buf.clear();
                 if self.out.conversation_id.is_none() {
                     self.out.conversation_id = ev["sessionID"].as_str().map(String::from);
-                    on(Activity::new("thinking", "요청을 읽는 중", false));
+                    on(Activity::new("thinking", "요청 맥락을 분석하는 중", false));
                 }
             }
             Some("text") => {
@@ -623,16 +674,36 @@ impl Collector {
                     self.step_buf.push_str(t);
                     self.all_text.push_str(t);
                 }
-                on(Activity::new("thinking", "정리해서 적는 중", false));
+                let last_line = self
+                    .step_buf
+                    .lines()
+                    .rev()
+                    .map(|l| l.trim().trim_start_matches('#').trim())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("결과물 작성 중");
+                let short_line: String = last_line.chars().take(42).collect();
+                let label = if short_line.is_empty() {
+                    "정리해서 적는 중".to_string()
+                } else {
+                    format!("작성 중 · {short_line}")
+                };
+                on(Activity::new("typing", label, false)
+                    .with_tool("stream")
+                    .with_detail(tail_chars(&self.step_buf, 520)));
             }
             Some("reasoning") => {
-                on(Activity::new("thinking", "생각하는 중", false));
+                if let Some(r) = ev["part"]["text"].as_str() {
+                    self.reasoning_buf.push_str(r);
+                }
+                on(Activity::new("thinking", "설계·추론하는 중", false)
+                    .with_tool("think")
+                    .with_detail(tail_chars(&self.reasoning_buf, 450)));
             }
             Some("tool_use") => {
                 self.out.tools_used += 1;
                 let tool = ev["part"]["tool"].as_str().unwrap_or("");
                 let state = &ev["part"]["state"];
-                let mut act = tool_activity(tool, &state["input"], true);
+                let mut act = tool_activity(tool, &state["input"], state, true);
                 if state["status"] == "error" {
                     act.label = format!("{} (실패)", act.label);
                 }

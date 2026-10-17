@@ -1,6 +1,6 @@
 [package]
 name = "ilson"
-version = "0.1.1"
+version = "0.1.2"
 description = "일손 — 사장님 대신 일하는 AI 직원 사무소"
 authors = ["ilson"]
 edition = "2024"

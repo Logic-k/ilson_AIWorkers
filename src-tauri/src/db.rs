@@ -1,4 +1,4 @@
-use crate::models::{status, EventRow, Gate, Settings, StepRow, Task};
+use crate::models::{status, CustomEmployee, EventRow, Gate, Settings, StepRow, Task};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
@@ -405,3 +405,48 @@ pub fn save_recent_input(conn: &Connection, employee_id: &str, input: &Value) ->
     )?;
     Ok(())
 }
+
+pub fn load_custom_employees(conn: &Connection) -> Result<Vec<CustomEmployee>> {
+    let json: Option<String> = conn
+        .query_row("SELECT value_json FROM settings WHERE key='custom_employees'", [], |r| r.get(0))
+        .optional()?;
+    Ok(json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+}
+
+pub fn save_custom_employees(conn: &Connection, list: &[CustomEmployee]) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value_json) VALUES ('custom_employees', ?1)
+         ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+        params![serde_json::to_string(list)?],
+    )?;
+    Ok(())
+}
+
+/// 완료/중단된 업무에 추가 지시를 내려 같은 세션에서 이어서 수행하도록 준비한다.
+pub fn prepare_followup(
+    conn: &Connection,
+    id: &str,
+    new_title: &str,
+    new_input: &Value,
+    reset_keys: &[&str],
+    skip_keys: &[(&str, &str)],
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET title=?2, input_json=?3, status=?4, progress=10, current_step=NULL, current_actor=NULL, pending_gate_json=NULL, error=NULL, seen_at=NULL, updated_at=?5 WHERE id=?1",
+        params![id, new_title, new_input.to_string(), status::QUEUED, now()],
+    )?;
+    for key in reset_keys {
+        conn.execute(
+            "UPDATE task_steps SET status='pending', note=NULL, started_at=NULL, finished_at=NULL WHERE task_id=?1 AND key=?2",
+            params![id, key],
+        )?;
+    }
+    for (key, note) in skip_keys {
+        conn.execute(
+            "UPDATE task_steps SET status='done', output_json='{\"skipped\":true}', note=?3, finished_at=?4 WHERE task_id=?1 AND key=?2",
+            params![id, key, note, now()],
+        )?;
+    }
+    Ok(())
+}
+

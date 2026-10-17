@@ -1,9 +1,9 @@
-use crate::models::{status, Settings, Task};
+use crate::models::{status, CustomEmployee, Settings, Task};
 use crate::{db, engine, gitops, roster, runner, workers, AppState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -38,18 +38,36 @@ fn availability(conn: &rusqlite::Connection, employee: &Value, settings: &Settin
     json!({ "status": if busy { "busy" } else { "ready" }, "missing": [] })
 }
 
+fn find_employee(conn: &rusqlite::Connection, id: &str, safe: bool) -> Option<Value> {
+    if let Some(e) = roster::find(id) {
+        return Some(e);
+    }
+    let custom = db::load_custom_employees(conn).unwrap_or_default();
+    custom.iter().find(|c| c.id == id).map(|c| roster::custom_employee_json(c, safe))
+}
+
 #[tauri::command]
 pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value> {
     let conn = state.db.lock().unwrap();
     let settings = db::load_settings(&conn).map_err(err)?;
+    let custom_employees = db::load_custom_employees(&conn).unwrap_or_default();
     let tasks = db::list_tasks(&conn).map_err(err)?;
     let engines = state.engines.lock().unwrap().clone();
     let safe = !settings.auto_mode();
-    let employees: Vec<Value> = roster::all(safe)
+    let mut raw_employees = roster::all(safe);
+    for c in &custom_employees {
+        raw_employees.push(roster::custom_employee_json(c, safe));
+    }
+    let employees: Vec<Value> = raw_employees
         .into_iter()
         .map(|mut e| {
             let id = e["id"].as_str().unwrap_or("").to_string();
             e["availability"] = availability(&conn, &e, &settings, &engines, &tasks);
+            if let Some(extra_skill) = settings.custom_skills.get(&id) {
+                if !extra_skill.trim().is_empty() {
+                    e["equippedSkill"] = json!(extra_skill);
+                }
+            }
             if roster::requirements(&id).contains(&"opencode") {
                 let kind = settings.engine_for(&id);
                 let model = settings.model_for(kind).unwrap_or_else(|| crate::pricing::default_model_for(kind.id()).to_string());
@@ -112,14 +130,15 @@ pub fn mark_task_seen(app: AppHandle, state: State<'_, AppState>, id: String) ->
 
 #[tauri::command]
 pub fn create_task(app: AppHandle, state: State<'_, AppState>, employee_id: String, title: String, input: Value) -> CmdResult<Task> {
-    let employee = roster::find(&employee_id).ok_or("알 수 없는 직원입니다.")?;
-    let problems = roster::validate(&employee, &input);
-    if !problems.is_empty() {
-        return Err(problems.join("\n"));
-    }
     let task = {
         let conn = state.db.lock().unwrap();
         let settings = db::load_settings(&conn).map_err(err)?;
+        let safe = !settings.auto_mode();
+        let employee = find_employee(&conn, &employee_id, safe).ok_or("알 수 없는 직원입니다.")?;
+        let problems = roster::validate(&employee, &input);
+        if !problems.is_empty() {
+            return Err(problems.join("\n"));
+        }
         let tasks = db::list_tasks(&conn).map_err(err)?;
         let engines = state.engines.lock().unwrap().clone();
         let avail = availability(&conn, &employee, &settings, &engines, &tasks);
@@ -162,7 +181,6 @@ pub fn create_task(app: AppHandle, state: State<'_, AppState>, employee_id: Stri
             steps: vec![],
             events: vec![],
         };
-        let safe = !settings.auto_mode();
         let steps: Vec<(String, String)> = roster::steps(&employee_id, safe)
             .iter()
             .map(|s| (s.key.to_string(), s.label.to_string()))
@@ -517,3 +535,312 @@ pub async fn refresh_fx(state: State<'_, AppState>) -> CmdResult<Settings> {
     }
     Ok(settings)
 }
+
+/// 진행 중이거나 완료된 업무의 단계별 산출물(리서치·기획서·개발보고 등)을 가져온다.
+#[tauri::command]
+pub fn task_step_outputs(state: State<'_, AppState>, id: String) -> CmdResult<HashMap<String, Value>> {
+    let conn = state.db.lock().unwrap();
+    let rows = db::step_outputs(&conn, &id).map_err(err)?;
+    let mut map = HashMap::new();
+    for (k, st, out) in rows {
+        if st == "done" {
+            if let Some(v) = out {
+                map.insert(k, v);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// 완료·중단된 업무 세션에서 바로 추가 업무 지시를 내려 같은 폴더·맥락에서 이어서 작업한다.
+#[tauri::command]
+pub fn followup_task(app: AppHandle, state: State<'_, AppState>, id: String, prompt: String) -> CmdResult<Task> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return Err("추가로 지시할 업무 내용을 입력해 주세요.".into());
+    }
+    if state.running.lock().unwrap().contains_key(&id) {
+        return Err("현재 실행 중인 업무입니다. 끝나거나 멈춘 뒤에 추가 지시를 내려 주세요.".into());
+    }
+    let updated_task = {
+        let conn = state.db.lock().unwrap();
+        let task = db::get_task(&conn, &id).map_err(err)?;
+        let mut input = task.input.clone();
+        let prev_count = input["_followupCount"].as_u64().unwrap_or(0);
+        let next_count = prev_count + 1;
+
+        // 원래 제목을 보존하고 차수 + 요약 제목을 자동으로 붙인다.
+        let base_title = input["_baseTitle"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| task.title.clone());
+        input["_baseTitle"] = json!(base_title);
+        input["_followupCount"] = json!(next_count);
+        input["_followupLatest"] = json!(trimmed);
+
+        let mut history = input["_followupHistory"].as_array().cloned().unwrap_or_default();
+        history.push(json!({
+            "round": next_count,
+            "prompt": trimmed,
+            "at": db::now(),
+        }));
+        input["_followupHistory"] = json!(history);
+
+        // 코딩 업무는 이전에 병합된 실제 프로젝트 폴더(repo)를 그대로 이어받아 작업한다.
+        if roster::is_dev_id(&task.employee_id) {
+            let prev_repo = task
+                .result
+                .as_ref()
+                .and_then(|r| r["workspace"]["repo"].as_str())
+                .map(String::from)
+                .or_else(|| {
+                    db::step_outputs(&conn, &id)
+                        .ok()?
+                        .into_iter()
+                        .find(|(k, _, _)| k == "setup")
+                        .and_then(|(_, _, out)| out?["workspace"]["repo"].as_str().map(String::from))
+                });
+            if let Some(repo) = prev_repo {
+                if !repo.trim().is_empty() {
+                    input["folder"] = json!(repo);
+                    input["autoMerge"] = json!(true);
+                }
+            }
+            let prev_req = input["request"].as_str().unwrap_or("").trim().to_string();
+            input["request"] = json!(if prev_req.is_empty() {
+                trimmed.to_string()
+            } else {
+                format!("{prev_req}\n\n[{next_count}차 추가 지시] {trimmed}")
+            });
+        } else {
+            for field in ["facts", "focus", "context", "reference", "extra"] {
+                if input.get(field).is_some() {
+                    let prev = input[field].as_str().unwrap_or("").trim().to_string();
+                    input[field] = json!(if prev.is_empty() {
+                        format!("[추가 지시] {trimmed}")
+                    } else {
+                        format!("{prev}\n[추가 지시] {trimmed}")
+                    });
+                    break;
+                }
+            }
+        }
+
+        let safe = input["_engine"] != "auto";
+        let (short_title, reset_keys, skip_keys, assigned_summary) =
+            roster::route_followup(&task.employee_id, trimmed, safe);
+        let new_title = format!("{base_title} · {}차 ({short_title})", next_count + 1);
+
+        db::prepare_followup(&conn, &id, &new_title, &input, &reset_keys, &skip_keys).map_err(err)?;
+        db::add_event(
+            &conn,
+            &id,
+            "info",
+            &format!(
+                "⚡ [추가 업무 지시 · {}차] “{trimmed}” → OpenCode 자동 배정: {assigned_summary}",
+                next_count + 1
+            ),
+        )
+        .map_err(err)?;
+        db::get_task(&conn, &id).map_err(err)?
+    };
+    runner::emit(&app, &id);
+    runner::spawn(app, id);
+    Ok(updated_task)
+}
+
+#[tauri::command]
+pub fn list_skill_catalog() -> CmdResult<Vec<Value>> {
+    Ok(roster::builtin_skill_catalog())
+}
+
+fn to_raw_github_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 5 && parts[2] == "blob" {
+            let owner = parts[0];
+            let repo = parts[1];
+            let branch = parts[3];
+            let path = parts[4..].join("/");
+            return format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}");
+        }
+    }
+    trimmed.to_string()
+}
+
+fn parse_skill_markdown(md: &str, url: &str) -> Value {
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut body = md.trim().to_string();
+
+    if let Some(after_open) = md.trim_start().strip_prefix("---") {
+        if let Some(end_idx) = after_open.find("\n---") {
+            let fm = &after_open[..end_idx];
+            body = after_open[end_idx + 4..].trim().to_string();
+            for line in fm.lines() {
+                let l = line.trim();
+                if let Some(v) = l.strip_prefix("name:") {
+                    name = v.trim().trim_matches(['"', '\'']).to_string();
+                } else if let Some(v) = l.strip_prefix("description:") {
+                    description = v.trim().trim_matches(['"', '\'']).to_string();
+                }
+            }
+        }
+    }
+
+    if name.is_empty() {
+        if let Some(h1) = body.lines().find(|l| l.starts_with("# ")) {
+            name = h1[2..].trim().to_string();
+        }
+    }
+    if description.is_empty() {
+        if let Some(p) = body
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('-') && !l.starts_with('>'))
+        {
+            description = p.chars().take(120).collect();
+        }
+    }
+    let lower = format!("{name} {description} {body}").to_lowercase();
+    let is_dev = ["code", "react", "typescript", "rust", "python", "api", "frontend", "backend", "ui", "ux", "security", "test", "개발", "코드", "서버", "화면"]
+        .iter()
+        .any(|k| lower.contains(k));
+
+    let role = if !name.is_empty() {
+        name.chars().take(24).collect()
+    } else {
+        "전문 스킬 담당".to_string()
+    };
+    let summary = if !description.is_empty() {
+        description
+    } else {
+        "외부 스킬 문서(SKILL.md)를 기반으로 전문 업무를 수행합니다.".to_string()
+    };
+
+    json!({
+        "role": role,
+        "summary": summary,
+        "floor": if is_dev { "dev" } else { "office" },
+        "team": if is_dev { "개발팀" } else { "전문지원팀" },
+        "skillMarkdown": if body.is_empty() { md.trim().to_string() } else { body },
+        "sourceUrl": url.trim(),
+    })
+}
+
+/// GitHub URL(SKILL.md 또는 마크다운 주소)에서 스킬 내용을 읽어 직원 채용 초안으로 파싱한다.
+#[tauri::command]
+pub async fn import_skill_from_url(state: State<'_, AppState>, url: String) -> CmdResult<Value> {
+    let raw_url = to_raw_github_url(&url);
+    if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
+        return Err("올바른 http:// 또는 https:// 주소를 입력해 주세요.".into());
+    }
+    let resp = state
+        .http
+        .get(&raw_url)
+        .header("User-Agent", "Ilson-Desktop/0.1")
+        .send()
+        .await
+        .map_err(|e| format!("주소에서 스킬 문서를 가져오지 못했습니다: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("주소 응답 오류 (HTTP {})", resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| format!("본문을 읽지 못했습니다: {e}"))?;
+    if text.trim().is_empty() {
+        return Err("가져온 문서 내용이 비어 있습니다.".into());
+    }
+    let clipped: String = text.chars().take(12_000).collect();
+    Ok(parse_skill_markdown(&clipped, &url))
+}
+
+/// 새로운 AI 직원을 추가 고용한다.
+#[tauri::command]
+pub fn hire_employee(app: AppHandle, state: State<'_, AppState>, mut employee: CustomEmployee) -> CmdResult<Value> {
+    if employee.name.trim().is_empty() {
+        return Err("직원 이름을 입력해 주세요.".into());
+    }
+    if employee.role.trim().is_empty() {
+        return Err("담당 역할(직무)을 입력해 주세요.".into());
+    }
+    let prefix = if employee.floor == "dev" { "custom_dev_" } else { "custom_office_" };
+    if !employee.id.starts_with(prefix) {
+        let short = &uuid::Uuid::new_v4().simple().to_string()[..6];
+        employee.id = format!("{prefix}{short}");
+    }
+    if employee.team.trim().is_empty() {
+        employee.team = if employee.floor == "dev" { "개발팀".into() } else { "전문지원팀".into() };
+    }
+    if employee.summary.trim().is_empty() {
+        employee.summary = format!("{} 전문 스킬을 바탕으로 업무를 수행합니다.", employee.role);
+    }
+    if employee.motto.trim().is_empty() {
+        employee.motto = "장착된 전문 스킬로 빈틈없이 완수합니다.".into();
+    }
+
+    let emp_json = {
+        let conn = state.db.lock().unwrap();
+        let settings = db::load_settings(&conn).map_err(err)?;
+        let mut list = db::load_custom_employees(&conn).unwrap_or_default();
+        if let Some(existing) = list.iter_mut().find(|e| e.id == employee.id) {
+            *existing = employee.clone();
+        } else {
+            list.push(employee.clone());
+        }
+        db::save_custom_employees(&conn, &list).map_err(err)?;
+        roster::custom_employee_json(&employee, !settings.auto_mode())
+    };
+    let _ = app.emit("engine-updated", ());
+    Ok(emp_json)
+}
+
+/// 추가 고용한 AI 직원을 해고(목록에서 제거)한다.
+#[tauri::command]
+pub fn dismiss_employee(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if !id.starts_with("custom_") {
+        return Err("기본 소속 직원은 해고할 수 없습니다.".into());
+    }
+    {
+        let conn = state.db.lock().unwrap();
+        let mut list = db::load_custom_employees(&conn).unwrap_or_default();
+        list.retain(|e| e.id != id);
+        db::save_custom_employees(&conn, &list).map_err(err)?;
+    }
+    let _ = app.emit("engine-updated", ());
+    Ok(())
+}
+
+/// 기존 직원 또는 특채 직원에게 추가 전문 스킬(SKILL.md)을 장착하거나 해제한다.
+#[tauri::command]
+pub fn save_employee_skill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+    skill_markdown: String,
+) -> CmdResult<Settings> {
+    let settings = {
+        let conn = state.db.lock().unwrap();
+        let mut s = db::load_settings(&conn).map_err(err)?;
+        let trimmed = skill_markdown.trim().to_string();
+        if trimmed.is_empty() {
+            s.custom_skills.remove(&employee_id);
+        } else {
+            s.custom_skills.insert(employee_id.clone(), trimmed.clone());
+        }
+        db::save_settings(&conn, &s).map_err(err)?;
+        if employee_id.starts_with("custom_") {
+            let mut list = db::load_custom_employees(&conn).unwrap_or_default();
+            if let Some(c) = list.iter_mut().find(|e| e.id == employee_id) {
+                if !trimmed.is_empty() {
+                    c.skill_markdown = trimmed;
+                    let _ = db::save_custom_employees(&conn, &list);
+                }
+            }
+        }
+        s
+    };
+    let _ = app.emit("engine-updated", ());
+    Ok(settings)
+}
+

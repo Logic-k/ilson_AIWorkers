@@ -29,7 +29,16 @@ interface Spot {
 }
 
 export function deskOf(id: string): Spot {
-  return isDev(id) ? { floor: 3, x: DEV_DESKS[id] ?? 100 } : { floor: 2, x: BIZ_DESKS[id] ?? 100 };
+  if (DEV_DESKS[id]) return { floor: 3, x: DEV_DESKS[id] };
+  if (BIZ_DESKS[id]) return { floor: 2, x: BIZ_DESKS[id] };
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  if (isDev(id)) {
+    const slots = [171, 321, 471, 621, 771, 908];
+    return { floor: 3, x: slots[h % slots.length] };
+  }
+  const slots = [152, 284, 416, 548, 680, 812, 936];
+  return { floor: 2, x: slots[h % slots.length] };
 }
 
 type Pose = "idle" | "typing" | "reading" | "running" | "waiting" | "confused" | "meeting" | "coffee" | "handing" | "cheer" | "paused";

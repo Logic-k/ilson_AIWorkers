@@ -651,8 +651,8 @@ pub fn estimate(
         .unwrap_or_else(|| pricing::default_model_for(engine.id()).to_string());
     let free = price.as_ref().map(|p| p.list_cost_zero).unwrap_or(false);
 
-    // 로컬 전용 직원(수진·도현)은 AI 토큰을 쓰지 않는다.
-    if matches!(employee_id, "sujin" | "dohyun") {
+    // 로컬 전용 직원은 AI 토큰을 쓰지 않는다.
+    if matches!(employee_id, "sujin" | "dohyun" | "sua" | "doyun") {
         return Ok(Estimate {
             engine: engine.id().to_string(),
             model,
@@ -668,7 +668,7 @@ pub fn estimate(
         });
     }
 
-    let (prompt, typical_output, step_key) = if roster::DEV_TEAM.contains(&employee_id) {
+    let (prompt, typical_output, step_key) = if roster::is_dev_id(employee_id) {
         let req = input["request"].as_str().unwrap_or("").trim();
         let focus = input["focus"].as_str().unwrap_or("").trim();
         let body = if !req.is_empty() { req } else { focus };

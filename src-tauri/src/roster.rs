@@ -25,6 +25,10 @@ const fn by(key: &'static str, label: &'static str, actor: &'static str) -> Step
 /// 개발팀 직원들 (사무실 화면에서 개발실에 앉는다).
 pub const DEV_TEAM: &[&str] = &["taeo", "yuna", "geonwoo", "sohee", "minhyuk", "daeun"];
 
+pub fn is_dev_id(id: &str) -> bool {
+    DEV_TEAM.contains(&id) || id.starts_with("custom_dev_")
+}
+
 pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
     match employee_id {
         // 안전 모드: 사장님이 OpenCode 터미널에서 실행하면 태오가 팀원을 서브에이전트로 부른다.
@@ -37,6 +41,12 @@ pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
         "yuna" | "geonwoo" if safe => vec![
             step("setup", "작업 공간 준비", None),
             step("build", "개발·리뷰 (직접 실행)", None),
+            step("merge", "병합", Some("merge")),
+            step("deliver", "결과 보고", None),
+        ],
+        id if id.starts_with("custom_dev_") && safe => vec![
+            step("setup", "작업 공간 준비", None),
+            step("build", "전문 개발·리뷰 (직접 실행)", None),
             step("merge", "병합", Some("merge")),
             step("deliver", "결과 보고", None),
         ],
@@ -112,6 +122,18 @@ pub fn steps(employee_id: &str, safe: bool) -> Vec<StepDef> {
         "minhyuk" => vec![
             step("review", "코드 리뷰", None),
             step("deliver", "리뷰 보고", None),
+        ],
+        id if id.starts_with("custom_dev_") => vec![
+            step("setup", "작업 공간 준비", None),
+            step("build", "전문 스킬 개발·적용", None),
+            by("review", "코드 리뷰", "minhyuk"),
+            step("merge", "병합", Some("merge")),
+            step("deliver", "결과 보고", None),
+        ],
+        id if id.starts_with("custom_office_") => vec![
+            step("prepare", "요청·자료 확인", None),
+            step("write", "전문 스킬 수행", None),
+            step("deliver", "결과 보고", None),
         ],
         _ => vec![],
     }
@@ -704,7 +726,8 @@ pub fn is_ai_step(employee_id: &str, key: &str) -> bool {
         "harin" | "jiho" => key == "write",
         "seojin" | "yena" => key == "analyze",
         "minjae" => key == "research",
-        id if DEV_TEAM.contains(&id) => matches!(key, "team" | "research" | "plan" | "frontend" | "backend" | "build" | "test" | "docs" | "review" | "fix"),
+        id if id.starts_with("custom_office_") => key == "write",
+        id if is_dev_id(id) => matches!(key, "team" | "research" | "plan" | "frontend" | "backend" | "build" | "test" | "docs" | "review" | "fix"),
         _ => false,
     }
 }
@@ -971,7 +994,243 @@ pub fn default_title(employee: &Value, input: &Value) -> String {
         "yena" => Some("지원사업 공고 점검".to_string()),
         "taeo" | "yuna" | "geonwoo" | "sohee" | "daeun" => pick("request").map(|r| clean_project_title(&r)),
         "minhyuk" => Some("코드 리뷰".to_string()),
+        id if id.starts_with("custom_") => pick("request").map(|r| clean_project_title(&r)),
         _ => None,
     };
     subject.unwrap_or_else(|| format!("{} 새 업무", employee["name"].as_str().unwrap_or("")))
 }
+
+/// 추가 고용한 AI 직원을 프론트엔드 Employee JSON 스키마로 변환한다.
+pub fn custom_employee_json(c: &crate::models::CustomEmployee, safe: bool) -> Value {
+    let is_dev = c.id.starts_with("custom_dev_") || c.floor == "dev";
+    let mode = if is_dev { "ai_local" } else { "ai" };
+    let caps = if c.capabilities.is_empty() {
+        vec!["전문 스킬 수행".to_string(), "맞춤 지시 이행".to_string(), "결과 보고서 작성".to_string()]
+    } else {
+        c.capabilities.clone()
+    };
+    let form = if is_dev {
+        json!([
+            { "title": "필수 입력", "fields": [
+                optional_folder_field(),
+                { "id": "request", "kind": "textarea", "label": "요청할 작업·기능", "required": true, "placeholder": "예: 이 프로젝트의 UI 접근성과 디자인 시스템을 점검하고 개선해 주세요." }
+            ]},
+            permission_section(true)
+        ])
+    } else {
+        json!([
+            { "title": "필수 입력", "fields": [
+                { "id": "request", "kind": "textarea", "label": "요청할 업무 내용", "required": true, "placeholder": "예: 우리 서비스의 핵심 가치를 담은 상세페이지 카피와 FAQ를 작성해 주세요." },
+                { "id": "context", "kind": "textarea", "label": "참고 자료·배경 정보 (선택)", "placeholder": "참고할 사실, 타깃 고객, 조건 등을 자유롭게 적어 주세요." }
+            ]},
+            { "title": "추가 설정", "fields": [
+                web_search_field("3", "웹 검색 활용"),
+                { "id": "useBrandStyle", "kind": "checkbox", "label": "설정에 저장한 브랜드 문체 반영", "default": true }
+            ]}
+        ])
+    };
+    json!({
+        "id": c.id,
+        "name": c.name,
+        "role": c.role,
+        "team": c.team,
+        "mode": mode,
+        "hue": c.hue,
+        "custom": true,
+        "floor": if is_dev { "dev" } else { "office" },
+        "skillMarkdown": c.skill_markdown,
+        "sourceUrl": c.source_url,
+        "summary": c.summary,
+        "motto": c.motto,
+        "capabilities": caps,
+        "inputSummary": if is_dev { "작업 폴더(선택), 요청 작업" } else { "요청 내용, 참고 자료" },
+        "outputSummary": if is_dev { "전문 스킬 코드·문서 반영 및 보고서" } else { "전문 스킬 기반 맞춤 산출물" },
+        "costSummary": "구독 포함 · 커스텀 스킬 적용",
+        "resume": {
+            "employeeNo": format!("ILSON-CUSTOM-{}", c.id.chars().rev().take(4).collect::<String>().to_uppercase()),
+            "experience": "특채 전문가",
+            "hometown": "오픈소스 스킬 허브",
+            "formerRole": format!("{} 스페셜리스트", c.role),
+            "intro": format!("{} 전문 스킬셋(SKILL.md)을 장착하고 영입된 특채 AI 직원입니다. {}", c.role, c.summary),
+            "career": [
+                { "period": "오픈소스", "org": "글로벌 에이전트 스킬 검증", "note": &c.role },
+                { "period": "2026 –", "org": format!("일손 {}", c.team), "note": "특채 전문 담당" }
+            ],
+            "skills": caps.iter().take(5).map(|label| json!({ "label": label, "score": 5 })).collect::<Vec<_>>(),
+            "reference": { "quote": &c.motto, "from": "스킬 매니페스트 검증" },
+            "interviewNote": "장착된 SKILL.md 지침과 체크리스트를 철저히 준수하여 일관된 고품질 산출물을 만듭니다."
+        },
+        "steps": steps_json(safe, &c.id),
+        "form": form
+    })
+}
+
+/// 완료·중단된 업무 세션에서 '추가 업무 지시'를 내렸을 때,
+/// 지시 내용을 분석해 자동으로 담당 직원(단계)을 배정하고 재실행할 단계와 건너뛸 단계를 결정한다.
+pub fn route_followup(
+    employee_id: &str,
+    prompt: &str,
+    safe: bool,
+) -> (String, Vec<&'static str>, Vec<(&'static str, &'static str)>, String) {
+    let short_title = clean_project_title(prompt);
+    let lower = prompt.to_lowercase();
+
+    if employee_id == "taeo" && !safe {
+        let want_research = ["조사", "리서치", "경쟁사", "레퍼런스", "트렌드", "검색"]
+            .iter()
+            .any(|k| lower.contains(k));
+        let only_docs = !want_research
+            && ["문서", "readme", "가이드", "설명서", "주석"]
+                .iter()
+                .any(|k| lower.contains(k))
+            && !["기능", "화면", "버튼", "오류", "버그", "수정", "추가", "변경", "디자인", " 스타일"]
+                .iter()
+                .any(|k| lower.contains(k));
+        let only_ui = !want_research
+            && !only_docs
+            && ["디자인", "색상", "컬러", "폰트", "레이아웃", "스타일", "css", "애니메이션", "반응형", "다크모드", "아이콘"]
+                .iter()
+                .any(|k| lower.contains(k))
+            && !["db", "데이터베이스", "서버", "api", "백엔드", "저장", "로직", "계산"]
+                .iter()
+                .any(|k| lower.contains(k));
+
+        if only_docs {
+            let reset = vec!["setup", "docs", "merge", "deliver"];
+            let skip = vec![
+                ("research", "추가 지시: 문서 전담 배정으로 생략"),
+                ("plan", "추가 지시: 문서 전담 배정으로 생략"),
+                ("backend", "추가 지시: 문서 전담 배정으로 생략"),
+                ("frontend", "추가 지시: 문서 전담 배정으로 생략"),
+                ("test", "추가 지시: 문서 전담 배정으로 생략"),
+                ("review", "추가 지시: 문서 전담 배정으로 생략"),
+                ("fix", "추가 지시: 문서 전담 배정으로 생략"),
+            ];
+            return (
+                short_title,
+                reset,
+                skip,
+                "다은(문서화) → 태오(병합·완료)".to_string(),
+            );
+        }
+
+        if only_ui {
+            let reset = vec!["setup", "plan", "frontend", "test", "review", "fix", "merge", "deliver"];
+            let skip = vec![
+                ("research", "추가 지시: 기존 리서치 유지"),
+                ("backend", "추가 지시: 화면·UI 집중 수정으로 코어 단계 생략"),
+                ("docs", "추가 지시: 기존 README 유지"),
+            ];
+            return (
+                short_title,
+                reset,
+                skip,
+                "태오(설계 갱신) → 유나(화면·UI) → 소희(QA) → 민혁(리뷰)".to_string(),
+            );
+        }
+
+        let mut reset = vec!["setup"];
+        let mut skip = vec![];
+        if want_research {
+            reset.push("research");
+        } else {
+            skip.push(("research", "추가 지시: 기존 도메인 리서치 유지"));
+        }
+        reset.extend(["plan", "backend", "frontend", "test", "review", "fix", "docs", "merge", "deliver"]);
+        return (
+            short_title,
+            reset,
+            skip,
+            if want_research {
+                "서진(리서치) → 태오(기획) → 건우(코어) → 유나(UI) → 소희(QA) → 민혁(리뷰) → 다은(문서)".to_string()
+            } else {
+                "태오(기획 갱신) → 건우(코어) → 유나(UI) → 소희(QA) → 민혁(리뷰) → 다은(문서)".to_string()
+            },
+        );
+    }
+
+    // 그 외 직원(단일 개발자 또는 사무실 직원): 모든 단계를 순서대로 다시 실행하되 기존 작업물/폴더 맥락을 이어받는다.
+    let all_steps: Vec<&'static str> = steps(employee_id, safe).into_iter().map(|s| s.key).collect();
+    let actor_label = find(employee_id)
+        .and_then(|e| {
+            Some(format!(
+                "{}({})",
+                e["name"].as_str()?,
+                e["role"].as_str().unwrap_or("담당")
+            ))
+        })
+        .unwrap_or_else(|| "담당 AI 직원".to_string());
+    (short_title, all_steps, vec![], actor_label)
+}
+
+/// 오픈소스 에이전트 스킬 카탈로그 (원클릭으로 직원을 추가 고용하거나 기존 직원에게 장착 가능).
+pub fn builtin_skill_catalog() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "ui_ux_architect",
+            "name": "시우",
+            "role": "UI/UX 디자인 아키텍트",
+            "team": "개발팀",
+            "floor": "dev",
+            "hue": 315,
+            "summary": "디자인 시스템, 마이크로 인터랙션, WCAG 접근성, 타이포그래피·컬러 위계를 설계하고 감각적인 UI로 고도화합니다.",
+            "motto": "디테일과 여백이 제품의 품격을 만듭니다.",
+            "capabilities": ["디자인 토큰 설계", "마이크로 인터랙션", "WCAG 접근성 감사", "반응형 그리드 최적화"],
+            "sourceUrl": "https://github.com/msitarzewski/agency-agents (ux-architect & ui-designer)",
+            "skillMarkdown": "## 전문 스킬: UI/UX 디자인 아키텍트 (Design System & Craft)\n\n### 핵심 원칙\n1. **시각적 위계(Visual Hierarchy)**: 한 화면에서 가장 중요한 핵심 행동(Primary CTA)이 1초 안에 눈에 들어오도록 대비·크기·여백을 설계합니다.\n2. **디자인 토큰 일관성**: 하드코딩된 색상/간격 대신 CSS 변수(`--bg`, `--surface`, `--accent`, `--radius`, `--shadow`) 체계를 일관되게 사용합니다.\n3. **상호작용 피드백**: 모든 버튼·카드·입력창에 `:hover`, `:focus-visible`, `:active`, 로딩·빈 상태(Empty State)를 빠짐없이 구현합니다.\n4. **접근성(WCAG AA)**: 명도 대비 4.5:1 이상, 키보드 탭 이동, 시맨틱 태그(`main`, `nav`, `section`, `button`)와 `aria-label`을 보장합니다."
+        }),
+        json!({
+            "id": "security_auditor",
+            "name": "태현",
+            "role": "보안·안정성 엔지니어",
+            "team": "개발팀",
+            "floor": "dev",
+            "hue": 195,
+            "summary": "OWASP Top 10 취약점, 입력값 검증, 시크릿 노출, 예외 처리 누락을 전수 점검하고 방어 코드를 적용합니다.",
+            "motto": "뚫리지 않는 코드가 진짜 완성된 코드입니다.",
+            "capabilities": ["OWASP 취약점 점검", "입력 검증·XSS 방어", "민감정보 유출 차단", "에러 복구 탄력성"],
+            "sourceUrl": "https://github.com/msitarzewski/agency-agents (security-engineer)",
+            "skillMarkdown": "## 전문 스킬: 애플리케이션 보안 & 방어 엔지니어링 (OWASP Top 10)\n\n### 핵심 원칙\n1. **신뢰 경계 검증**: 모든 외부 입력(사용자 폼, URL 파라미터, 파일 경로, API 응답)은 반드시 타입·길이·허용 문자 검증을 거칩니다.\n2. **XSS 및 인젝션 원천 차단**: `innerHTML`에 원시 문자열 삽입을 금지하고 안전한 DOM API 또는 이스케이프를 적용합니다.\n3. **시크릿 보호**: API 키·토큰·개인정보가 소스코드나 로그에 평문으로 남지 않도록 격리합니다.\n4. **안전한 실패(Fail-Safe)**: 네트워크·스토리지 오류 시 앱이 멈추지 않고 사용자에게 친절한 복구 안내를 표시합니다."
+        }),
+        json!({
+            "id": "growth_copywriter",
+            "name": "나윤",
+            "role": "전환율 카피라이터",
+            "team": "마케팅팀",
+            "floor": "office",
+            "hue": 340,
+            "summary": "상세페이지, 랜딩페이지, 광고 카피, 고객 설득 구조를 행동심리학 프레임워크(PAS·AIDA)로 설계합니다.",
+            "motto": "고객의 문제에서 시작해 클릭으로 끝나는 문장을 씁니다.",
+            "capabilities": ["상세페이지 기획·카피", "AIDA·PAS 설득 구조", "헤드라인 AB 후보", "FAQ·반론 극복 문구"],
+            "sourceUrl": "https://github.com/msitarzewski/agency-agents (ad-creative-strategist & growth-hacker)",
+            "skillMarkdown": "## 전문 스킬: 전환 중심 카피라이팅 & 랜딩 구조 설계\n\n### 핵심 원칙\n1. **PAS 프레임워크**: 문제 제기(Problem) → 공감·구체화(Agitate) → 명쾌한 해결책(Solution) 흐름으로 독자의 이탈을 막습니다.\n2. **구체적 숫자·증거 중심**: '매우 빠름/좋음' 같은 추상어 대신 구체적인 변화와 사용 장면을 생생하게 묘사합니다.\n3. **헤드라인 5종 제시**: 문제 해결형, 숫자·근거형, 호기심 유발형, 타깃 지목형, 비교 우위형 헤드라인을 함께 제안합니다.\n4. **구매 망설임 제거(FAQ)**: 고객이 결제/문의 직전에 가장 망설이는 질문 5가지를 뽑아 안심시키는 답변을 작성합니다."
+        }),
+        json!({
+            "id": "data_analyst",
+            "name": "준서",
+            "role": "데이터·지표 분석가",
+            "team": "기획팀",
+            "floor": "office",
+            "hue": 175,
+            "summary": "매출·비용·고객 데이터를 구조화해 핵심 KPI 대시보드 설계안, 손익 시뮬레이션, 실행 전략 보고서를 만듭니다.",
+            "motto": "감이 아니라 숫자로 다음 행동을 결정합니다.",
+            "capabilities": ["KPI 지표 설계", "손익·단가 시뮬레이션", "데이터 시각화 구조", "의사결정 요약 보고"],
+            "sourceUrl": "https://github.com/msitarzewski/agency-agents (analytics-reporter)",
+            "skillMarkdown": "## 전문 스킬: 비즈니스 데이터 분석 & 의사결정 리포팅\n\n### 핵심 원칙\n1. **결론 우선(Pyramid Principle)**: 보고서 첫머리에 핵심 결론 3줄과 권장 행동(Action Item)을 먼저 제시합니다.\n2. **마크다운 비교표 적극 활용**: 모든 수치와 대안 비교는 한눈에 비교 가능한 마크다운 표와 변화율(%)로 정리합니다.\n3. **시나리오 분석**: 낙관적(Best) · 기본(Base) · 보수적(Worst) 3가지 시나리오로 리스크와 기대 효과를 함께 계산합니다."
+        }),
+        json!({
+            "id": "game_interactive_dev",
+            "name": "시온",
+            "role": "인터랙티브·게임 개발자",
+            "team": "개발팀",
+            "floor": "dev",
+            "hue": 270,
+            "summary": "HTML5 Canvas, WebAudio, 물리·파티클 효과, 타격감과 사운드 피드백이 살아있는 미니게임·인터랙티브 웹앱을 개발합니다.",
+            "motto": "조작감 0.1초의 차이가 재미를 결정합니다.",
+            "capabilities": ["Canvas·애니메이션 루프", "타격감·파티클 연출", "점수·랭킹·스테이지", "키보드·터치 동시 지원"],
+            "sourceUrl": "https://github.com/msitarzewski/agency-agents (game-designer & frontend-developer)",
+            "skillMarkdown": "## 전문 스킬: 인터랙티브 웹 & 게임 메카닉 엔지니어링\n\n### 핵심 원칙\n1. **60FPS 게임 루프**: `requestAnimationFrame`과 델타 타임(`dt`) 기반의 끊김 없는 물리·애니메이션 업데이트를 구현합니다.\n2. **주스(Game Feel & Juice)**: 행동마다 시각적 피드백(화면 흔들림, 파티클, 점수 팝업, 부드러운 이징)을 넣어 생동감을 극대화합니다.\n3. **완결된 게임 루프**: 타이틀/시작 화면 → 튜토리얼 힌트 → 스테이지/난이도 상승 → 최고 점수(`localStorage`) → 즉시 재도전 흐름을 완비합니다."
+        })
+    ]
+}
+

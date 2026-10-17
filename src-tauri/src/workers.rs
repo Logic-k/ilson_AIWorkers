@@ -2,7 +2,7 @@
 
 use crate::engine::{self, Activity, Kind, Level};
 use crate::gitops::{self, Workspace};
-use crate::models::{Gate, Settings};
+use crate::models::{CustomEmployee, Gate, Settings};
 use crate::{db, roster, web, AppState};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -18,6 +18,7 @@ pub struct Ctx {
     pub input: Value,
     pub outputs: HashMap<String, Value>,
     pub settings: Settings,
+    pub custom_employees: Vec<CustomEmployee>,
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
 }
@@ -57,17 +58,75 @@ impl Ctx {
         self.outputs.get(key).unwrap_or(&Value::Null)
     }
 
+    pub fn employee_of(&self, id: &str) -> Value {
+        if let Some(v) = roster::find(id) {
+            return v;
+        }
+        if let Some(c) = self.custom_employees.iter().find(|e| e.id == id) {
+            return roster::custom_employee_json(c, false);
+        }
+        Value::Null
+    }
+
+    pub fn name_of(&self, id: &str) -> String {
+        self.employee_of(id)["name"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| name_of(id))
+    }
+
+    pub fn skill_block(&self, id: &str) -> String {
+        let mut parts = Vec::new();
+        if let Some(c) = self.custom_employees.iter().find(|e| e.id == id) {
+            if !c.skill_markdown.trim().is_empty() {
+                parts.push(c.skill_markdown.trim().to_string());
+            }
+        }
+        if let Some(extra) = self.settings.custom_skills.get(id) {
+            if !extra.trim().is_empty() {
+                parts.push(extra.trim().to_string());
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n[장착된 전문 스킬 지침 (SKILL.md)]\n{}", parts.join("\n\n"))
+        }
+    }
+
+    pub fn persona_of(&self, id: &str) -> String {
+        let e = self.employee_of(id);
+        let company = if roster::is_dev_id(id) {
+            "AI 코딩 회사 '일손' 개발팀"
+        } else {
+            "AI 직원 사무소 '일손'"
+        };
+        format!(
+            "너는 {company}의 {} '{}'다. 신조: “{}”{}",
+            e["role"].as_str().unwrap_or("전문가"),
+            e["name"].as_str().unwrap_or(id),
+            e["motto"].as_str().unwrap_or("정확하고 실용적인 결과를 만듭니다."),
+            self.skill_block(id)
+        )
+    }
+
     /// 사무실 화면과 업무 기록에 지금 하는 일을 알린다.
     fn report(&self, actor: &str, act: &Activity) {
         let payload = json!({
-            "taskId": self.task_id, "employeeId": actor, "kind": act.kind, "label": act.label,
-            "engine": self.settings.engine_for(actor).id(), "at": db::now(),
+            "taskId": self.task_id,
+            "employeeId": actor,
+            "kind": act.kind,
+            "label": act.label,
+            "detail": act.detail,
+            "tool": act.tool,
+            "engine": self.settings.engine_for(actor).id(),
+            "at": db::now(),
         });
         let state = self.app.state::<AppState>();
         state.activities.lock().unwrap().insert(actor.to_string(), payload.clone());
         if act.notable {
             if let Ok(conn) = state.db.lock() {
-                let name = roster::find(actor).and_then(|e| e["name"].as_str().map(String::from)).unwrap_or_default();
+                let name = self.name_of(actor);
                 let _ = db::add_event(&conn, &self.task_id, "info", &format!("{name} · {}", act.label));
             }
         }
@@ -436,9 +495,34 @@ pub(crate) fn ai_request_from_input(
             }
             (YENA_SYSTEM.to_string(), user, 4500)
         }
+        other if other.starts_with("custom_office_") => {
+            let req = val_s(input, "request");
+            let ctx_text = val_s(input, "context");
+            let mut user = format!("[사장님 요청]\n{req}\n");
+            if !ctx_text.is_empty() {
+                user.push_str(&format!("\n[참고 자료·배경]\n{ctx_text}\n"));
+            }
+            user.push_str(&format!("\n[사업장]\n{}\n", business_block(s)));
+            if val_b(input, "useBrandStyle", true) {
+                user.push_str(&format!("\n[브랜드 문체]\n{}\n", brand_block(s)));
+            }
+            if searches > 0 {
+                user.push_str(&format!("\n웹 검색을 최대 {searches}회 활용하여 근거를 보강할 수 있다.\n"));
+            }
+            let sys = "너는 사장님을 돕는 특채 AI 전문가다. 장착된 전문 스킬 지침(SKILL.md)을 철저히 준수하여, 군더더기 인사 없이 즉시 실무에 쓸 수 있는 구조화된 마크다운(`# 제목`, `## 핵심 요약`, 본문 섹션, 표, 체크리스트)으로만 출력한다.".to_string();
+            (sys, user, 3800)
+        }
         other => bail!("AI 단계가 없는 직원입니다: {other}"),
     };
-    Ok((format!("{system}\n\n---\n{user}"), searches, typical))
+    let followup_latest = val_s(input, "_followupLatest");
+    let followup_block = if followup_latest.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n[⚡ 사장님의 추가 업무 지시 (이번 실행에서 최우선으로 반영·수정할 내용)]\n{followup_latest}\n"
+        )
+    };
+    Ok((format!("{system}\n\n---\n{user}{followup_block}"), searches, typical))
 }
 
 pub(crate) fn ai_request(ctx: &Ctx) -> Result<(String, u32, u32)> {
@@ -489,7 +573,7 @@ fn name_of(id: &str) -> String {
 
 fn persona(id: &str) -> String {
     let e = roster::find(id).unwrap_or(Value::Null);
-    let company = if roster::DEV_TEAM.contains(&id) { "AI 코딩 회사 '일손' 개발팀" } else { "AI 직원 사무소 '일손'" };
+    let company = if roster::is_dev_id(id) { "AI 코딩 회사 '일손' 개발팀" } else { "AI 직원 사무소 '일손'" };
     format!(
         "너는 {company}의 {} '{}'다. 신조: “{}”",
         e["role"].as_str().unwrap_or(""),
@@ -625,12 +709,13 @@ fn skipped(note: &str) -> StepResult {
     StepResult::new(json!({ "skipped": true }), note)
 }
 
-fn dev_for_fix(ctx: &Ctx) -> &'static str {
+fn dev_for_fix(ctx: &Ctx) -> String {
     match ctx.employee_id.as_str() {
-        "geonwoo" => "geonwoo",
-        "yuna" => "yuna",
-        _ if ctx.s("devs") == "backend" => "geonwoo",
-        _ => "yuna",
+        "geonwoo" => "geonwoo".into(),
+        "yuna" => "yuna".into(),
+        id if id.starts_with("custom_dev_") => id.into(),
+        _ if ctx.s("devs") == "backend" => "geonwoo".into(),
+        _ => "yuna".into(),
     }
 }
 
@@ -642,7 +727,7 @@ fn run_mode(ctx: &Ctx, edits: bool) -> Level {
     }
 }
 
-fn review_prompt(focus: &str, plan_md: &str, test_md: &str, patch: &str, safe: bool) -> String {
+fn review_prompt(ctx: &Ctx, focus: &str, plan_md: &str, test_md: &str, patch: &str, safe: bool) -> String {
     let plan_block = if plan_md.trim().is_empty() {
         String::new()
     } else {
@@ -655,7 +740,7 @@ fn review_prompt(focus: &str, plan_md: &str, test_md: &str, patch: &str, safe: b
     };
     format!(
         "{}\n아래 변경을 검토한다. 코드는 고치지 않는다. 필요하면 작업 공간의 실제 파일을 읽어 맥락과 연결 상태를 확인한다. 확신이 없는 지적은 ‘확인 필요’라고 표시한다.\n\n검토 원칙\n1. 태오 설계서의 ‘수용 기준(Acceptance Criteria)’이 빠짐없이 구현되었는지 확인한다.\n2. 클릭해도 동작하지 않는 더미 버튼, 미구현 TODO, 코어 로직과 화면 UI 사이의 함수/DOM ID 불일치, 런타임 에러 가능성을 집중 점검한다.\n3. 사소한 취향 차이가 아니라 실제로 프로그램 동작을 가로막는 중대한 결함이 있을 때만 `판정: 수정 필요`를 내린다.\n\n[요청·중점]\n{}\n{plan_block}{test_block}\n[변경 내용 (diff)]\n```diff\n{patch}\n```\n\n{}\n\n# 코드 리뷰\n## 요약\n## 반드시 고칠 것\n(없으면 '없음'. 있으면 파일:줄 · 문제 · 고치는 방법)\n## 고치면 좋은 것\n## 좋았던 점\n\n마지막 줄에는 정확히 `판정: 통과` 또는 `판정: 수정 필요` 중 하나만 쓴다.",
-        persona("minhyuk"),
+        ctx.persona_of("minhyuk"),
         if focus.is_empty() { "(따로 없음)" } else { focus },
         finish_rule(safe, "minhyuk", true)
     )
@@ -673,7 +758,15 @@ fn verdict(text: &str) -> &'static str {
 pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
     let safe_for = |actor: &str| handoff_for(ctx, actor);
     let emp = ctx.employee_id.as_str();
-    let request = ctx.s("request");
+    let raw_request = ctx.s("request");
+    let followup_latest = ctx.s("_followupLatest");
+    let request = if followup_latest.is_empty() {
+        raw_request
+    } else {
+        format!(
+            "{raw_request}\n\n[⚡ 이번 추가 업무 지시 (기존 코드·기능을 유지하면서 이 지시를 최우선으로 반영해 주세요)]\n{followup_latest}"
+        )
+    };
     let job = |actor: &str, cwd: PathBuf, prompt: String, level: Level, edits: bool, label: &str, team: &[&str]| {
         Plan::Ai(AiJob {
             actor: actor.into(),
@@ -688,7 +781,8 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
     };
     let ws_path = || ctx.workspace().map(|ws| PathBuf::from(ws.path));
 
-    let business = matches!((emp, key), ("harin", "write") | ("seojin", "analyze") | ("minjae", "research") | ("jiho", "write") | ("yena", "analyze"));
+    let business = matches!((emp, key), ("harin", "write") | ("seojin", "analyze") | ("minjae", "research") | ("jiho", "write") | ("yena", "analyze"))
+        || (emp.starts_with("custom_office_") && key == "write");
     if business {
         let (prompt, searches, _) = ai_request(ctx)?;
         let tail = if safe_for(emp) {
@@ -699,9 +793,9 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
         let dir = ctx.data_dir.join("runs").join(&ctx.task_id);
         // 웹 검색은 헤드리스에서 허락을 물을 수 없어, 빈 폴더 + 샌드박스 안에서만 자동 승인한다.
         let level = if searches > 0 { Level::Sandbox } else { Level::ReadOnly };
-        return Ok(job(emp, dir, format!("{}\n\n{prompt}{tail}", persona(emp)), level, false, "AI 작업", &[emp]));
+        return Ok(job(emp, dir, format!("{}\n\n{prompt}{tail}", ctx.persona_of(emp)), level, false, "AI 작업", &[emp]));
     }
-    if !roster::DEV_TEAM.contains(&emp) {
+    if !roster::is_dev_id(emp) {
         return Ok(Plan::Local);
     }
 
@@ -747,7 +841,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             let prompt = format!(
                 "# 업무 지시서 — {}\n\n{}\n\n## 요청\n{request}\n\n## 진행 순서\n{}\n\n## 진행 표시\n각 직원은 일을 시작할 때 `{PROGRESS_DIR}/status-<이름>.txt`에 지금 하는 일을 한 줄로 쓰고, 끝나면 `{PROGRESS_DIR}/report-<이름>.md`에 보고서를 쓴다. (이름: {})\n\n{}",
                 ctx.title,
-                persona("taeo"),
+                ctx.persona_of("taeo"),
                 order.join("\n"),
                 team.join(", "),
                 rules(ctx.b("allowRun", false), true, "taeo")
@@ -768,7 +862,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let prompt = format!(
                 "{}\n너는 개발팀(태오·건우·유나·소희)이 착수하기 전에 **도메인·핵심 기능·UX·권장 아키텍처 리서치 브리프**를 작성하는 역할이다.\n코드는 아직 작성하지 않는다(파일 수정 금지). 기존 파일이 있다면 읽기만 하여 구조를 파악한다.\n\n[사장님 한줄/상세 요청]\n{request}\n\n[작업 유형]\n- 유형: {mode_desc}\n- 현재 작업 공간 파일: {files_summary}\n\n{}\n\n아래 형식의 마크다운으로 구체적이고 실용적인 리서치 브리프를 작성한다.\n\n# 도메인 & 프로그램 리서치 브리프: {}\n> 한 줄 핵심 가치 요약\n## 1. 사용자 의도 및 해결하려는 핵심 문제\n## 2. 필수 핵심 기능 (MVP Core Features)\n(사장님이 짧게 말했더라도 이 프로그램이 실제로 쓸모 있으려면 반드시 들어가야 할 핵심 기능 4~6가지를 구체적인 동작 단위로 정의)\n## 3. 데이터 영속성 및 엣지 케이스\n- 데이터 저장 방식 (새로고침/재실행 시 데이터 유지 방법, 초기 샘플 데이터 구성)\n- 놓치기 쉬운 엣지 케이스 (빈 상태 화면, 잘못된 입력 방어, 검색/필터/삭제 확인 등)\n## 4. 벤치마크 UX/UI 디자인 가이드\n- 화면 레이아웃 구성 및 시각적 계층 구조\n- 컬러 테마 및 직관적인 상태 피드백, 단축키/편의 기능\n## 5. 권장 기술 스택 및 파일 아키텍처\n(새 프로젝트이고 별도 프레임워크 지정이 없다면, 외부 빌드 없이 즉시 브라우저/로컬에서 열 수 있는 모던 Vanilla HTML5 + CSS3 + ES6 JavaScript 아키텍처(`index.html`, `styles.css`, `core.js`, `app.js`) 또는 요청에 가장 적합한 스택을 명확히 제안)",
-                persona("seojin"),
+                ctx.persona_of("seojin"),
                 finish_rule(safe_for("seojin"), "seojin", true),
                 ctx.title
             );
@@ -795,7 +889,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let prompt = format!(
                 "{}\n아래 요청과 리서치 브리프를 바탕으로 개발팀이 흔들림 없이 구현할 수 있는 **프로그램 기획 및 상세 설계서 (PRD & System Design)**를 작성한다.\n파일은 아직 수정하지 않는다.\n\n[요청]\n{request}\n\n[작업 공간 현황]\n- 참여 개발자: {devs}\n- 현재 파일 목록: {files_summary}\n{research_block}\n설계 원칙 (MetaGPT SOP)\n{greenfield_rule}\n- 건우(코어·로직)와 유나(화면·UI)가 서로 다른 함수 이름이나 데이터 필드를 써서 어긋나는 일이 없도록, **함수 시그니처·전역 객체/모듈 export 이름·데이터 스키마·DOM ID 계약**을 코드 수준으로 명확히 적는다.\n\n{}\n\n# 프로그램 기획 및 설계: {}\n## 1. 프로그램 목표 및 핵심 워크플로우\n## 2. 파일 트리 및 모듈 구성 (File Tree)\n- `파일경로`: 역할 설명 (담당: 건우 / 유나)\n## 3. 데이터 스키마 및 저장소 설계 (Data Schema & Persistence)\n(데이터 구조체/JSON 예시, 저장소 키, 초기 기본 샘플 데이터)\n## 4. 인터페이스 계약 및 역할 분담 (Interface Contract)\n### 서버·로직 — 건우 (해당 없으면 '없음')\n- 담당 파일:\n- 공개 함수/클래스 시그니처 및 동작 명세:\n### 화면 — 유나 (해당 없으면 '없음')\n- 담당 파일:\n- UI 레이아웃, 주요 DOM ID/클래스, 건우 모듈 호출 및 이벤트 연결 명세:\n## 5. 수용 기준 (Acceptance Criteria — QA 체크리스트)\n- [ ] (소희와 민혁이 검증할 구체적인 기능 동작 기준 5~8개)",
-                persona("taeo"),
+                ctx.persona_of("taeo"),
                 finish_rule(safe_for("taeo"), "taeo", true),
                 ctx.title
             );
@@ -806,6 +900,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
                 ("frontend", _) => "yuna",
                 ("backend", _) => "geonwoo",
                 (_, "geonwoo") => "geonwoo",
+                (_, id) if id.starts_with("custom_dev_") => id,
                 _ => "yuna",
             };
             let devs = ctx.s("devs");
@@ -814,7 +909,13 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             }
             let cwd = ws_path()?;
             let (_, files_summary) = workspace_files_summary(&cwd);
-            let part = if actor == "yuna" { "화면 — 유나" } else { "서버·로직 — 건우" };
+            let part = if actor == "yuna" {
+                "화면 — 유나".to_string()
+            } else if actor == "geonwoo" {
+                "서버·로직 — 건우".to_string()
+            } else {
+                format!("전문 개발 — {}", ctx.name_of(actor))
+            };
             let research = research_text(ctx);
             let research_block = if research.is_empty() {
                 String::new()
@@ -829,8 +930,10 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let role_guide = if actor == "geonwoo" {
                 "구현 지침 (건우 · 코어·로직)\n- 설계서에 정의된 데이터 스키마, 상태 관리, 영구 저장(`localStorage` 또는 파일/DB), 검색/필터/계산/내보내기 등 핵심 비즈니스 로직과 초기 샘플 데이터를 빈틈없이 구현한다.\n- 다음 단계에서 유나(화면 개발)가 너의 함수와 객체를 바로 호출할 수 있도록 설계서의 인터페이스 계약(함수명, 전역 `window.*` 또는 ES 모듈 export)을 정확히 지킨다.\n- `// TODO`나 빈 껍데기 함수를 남기지 말고 모든 로직이 실제로 동작하게 작성한다."
-            } else {
+            } else if actor == "yuna" {
                 "구현 지침 (유나 · 화면·UI·통합)\n- 먼저 현재 작업 공간에 있는 파일(특히 건우가 앞서 만든 코어 로직 파일)을 반드시 읽고, 그 함수 시그니처와 데이터 구조를 정확히 호출하여 화면 UI와 연결한다.\n- 모던하고 완성도 높은 디자인(반응형 레이아웃, 세련된 여백·색상·타이포그래피, 빈 상태 안내, 토스트/모달 피드백, 키보드 엔터/단축키 지원)을 구현한다.\n- 클릭해도 아무 일도 일어나지 않는 더미 버튼이나 깨진 스크립트 참조가 절대 없도록 모든 UI 이벤트를 실제 로직과 연결한다."
+            } else {
+                "구현 지침 (특채 전문 개발자)\n- 장착된 전문 스킬 지침(SKILL.md)과 사장님의 요청을 바탕으로 작업 공간의 코드를 직접 작성·개선한다.\n- 빈 껍데기나 TODO를 남기지 말고 즉시 실행·검증 가능한 완성도 높은 코드를 구현한다."
             };
             // 안전 모드 개인 업무는 한 번의 실행 안에서 민혁에게 리뷰까지 받는다.
             let sub = supports_subagents(ctx.settings.engine_for(actor));
@@ -841,11 +944,18 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let prompt = format!(
                 "{}\n\n[요청]\n{request}\n\n[현재 작업 공간 파일 목록]\n{files_summary}\n{research_block}{plan_block}\n{role_guide}\n\n{}{review}",
-                persona(actor),
+                ctx.persona_of(actor),
                 rules(ctx.b("allowRun", false), safe_for(actor), actor)
             );
             let team: &[&str] = if is_safe(ctx) && key == "build" && sub { &[actor, "minhyuk"] } else { &[actor] };
-            Ok(job(actor, cwd, prompt, run_mode(ctx, true), true, if actor == "yuna" { "화면·UI 개발" } else { "코어·로직 개발" }, team))
+            let job_label = if actor == "yuna" {
+                "화면·UI 개발"
+            } else if actor == "geonwoo" {
+                "코어·로직 개발"
+            } else {
+                "전문 스킬 개발"
+            };
+            Ok(job(actor, cwd, prompt, run_mode(ctx, true), true, job_label, team))
         }
         "test" => {
             if emp == "taeo" && !ctx.b("withTests", true) {
@@ -862,7 +972,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let prompt = format!(
                 "{}\n너는 QA 엔지니어이자 통합 검증 담당이다. 아래 순서로 프로그램을 철저히 검증하고 문제가 있으면 직접 고친다.\n\n1. **통합 및 연결 무결성 검증**: 생성·변경된 모든 파일을 읽고, HTML의 `<script>`/`<link>` 경로, 건우(코어 로직)의 함수/데이터 필드명과 유나(화면 UI)의 호출 코드·DOM ID/셀렉터가 100% 일치하는지 전수 대조한다. 불일치나 누락, 런타임 에러 가능성을 발견하면 즉시 코드를 수정해 완벽히 동작하게 만든다.\n2. **수용 기준(Acceptance Criteria) 점검**: 태오 설계서의 수용 기준이 모두 구현되었는지 하나씩 확인하고, 빠진 기능이 있으면 보완한다.\n3. **자동화 테스트 / 문법 검증**: 명령 실행이 허용되면 `node --check`나 프로젝트 테스트 러너로 문법·로직 오류를 검증한다.\n\n[요청]\n{request}\n{plan_block}\n[이번에 바뀐 파일]\n{}\n\n{}\n\n보고서의 ‘한 일’에는 수용 기준별 통과 여부와 발견해 고친 통합 문제를, ‘확인 방법’에는 검증 및 실행 방법을 적는다.",
-                persona("sohee"),
+                ctx.persona_of("sohee"),
                 if changed.is_empty() { "(아직 없음 — 요청 범위의 기존 코드를 테스트)".to_string() } else { changed },
                 rules(ctx.b("allowRun", false), safe_for("sohee"), "sohee")
             );
@@ -882,7 +992,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             };
             let prompt = format!(
                 "{}\n완성된 프로그램의 코드를 읽고, 사장님이 바로 프로그램을 켜고 사용할 수 있도록 친절한 `README.md` (착수 및 실행 가이드)를 작성한다. 기존 코드 동작은 망가뜨리지 않고 문서(`README.md` 등)만 작성·보강한다.\n\n`README.md` 필수 포함 내용:\n1. 프로그램 이름과 한 줄 소개\n2. 주요 기능 요약 및 사용 방법 (단축키, 데이터 저장 안내 등)\n3. **🚀 바로 실행(착수)하는 방법** (예: 폴더 안의 `index.html` 파일을 더블클릭해 브라우저에서 바로 열기, 또는 실행 명령어)\n4. 파일 구조 설명\n\n[요청]\n{request}\n\n[현재 작업 공간 파일]\n{files_summary}\n{plan_block}\n{}",
-                persona("daeun"),
+                ctx.persona_of("daeun"),
                 rules(false, safe_for("daeun"), "daeun")
             );
             Ok(job("daeun", cwd, prompt, Level::Edit, true, "착수 가이드·문서화", &["daeun"]))
@@ -892,7 +1002,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             // 안전 모드에서는 사장님 저장소에 관리용 파일을 남기지 않도록 업무 폴더에서 실행한다.
             let safe = safe_for("minhyuk");
             let cwd = if safe { ctx.data_dir.join("runs").join(&ctx.task_id) } else { PathBuf::from(&repo) };
-            let mut prompt = review_prompt(&ctx.s("focus"), "", "", &patch, safe);
+            let mut prompt = review_prompt(ctx, &ctx.s("focus"), "", "", &patch, safe);
             if safe {
                 prompt.push_str(&format!("\n\n원본 저장소는 `{repo}`에 있다. 맥락이 필요하면 그곳의 파일을 읽기만 한다."));
             }
@@ -910,7 +1020,7 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             }
             let plan = plan_text(ctx);
             let test_md = ctx.out("test")["markdown"].as_str().unwrap_or("");
-            Ok(job("minhyuk", PathBuf::from(ws.path), review_prompt(&request, &plan, test_md, &patch, safe_for("minhyuk")), Level::ReadOnly, false, "코드·품질 리뷰", &["minhyuk"]))
+            Ok(job("minhyuk", PathBuf::from(ws.path), review_prompt(ctx, &request, &plan, test_md, &patch, safe_for("minhyuk")), Level::ReadOnly, false, "코드·품질 리뷰", &["minhyuk"]))
         }
         "fix" => {
             let review = ctx.out("review");
@@ -922,11 +1032,11 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
             let plan_block = if plan.is_empty() { String::new() } else { format!("\n[태오의 설계서]\n{plan}\n") };
             let prompt = format!(
                 "{}\n코드 리뷰어 민혁의 의견 중 ‘반드시 고칠 것’을 반영하여 프로그램을 완결한다. 동의하지 않는 지적은 고치지 말고 보고서의 ‘남은 문제’에 이유를 적는다.\n\n[요청]\n{request}\n{plan_block}\n[민혁의 리뷰]\n{}\n\n{}",
-                persona(actor),
+                ctx.persona_of(&actor),
                 review["markdown"].as_str().unwrap_or(""),
-                rules(ctx.b("allowRun", false), safe_for(actor), actor)
+                rules(ctx.b("allowRun", false), safe_for(&actor), &actor)
             );
-            Ok(job(actor, ws_path()?, prompt, run_mode(ctx, true), true, "리뷰 반영·보완", &[actor]))
+            Ok(job(&actor, ws_path()?, prompt, run_mode(ctx, true), true, "리뷰 반영·보완", &[&actor]))
         }
         _ => Ok(Plan::Local),
     }
@@ -935,9 +1045,9 @@ pub fn plan(ctx: &Ctx, key: &str) -> Result<Plan> {
 // ───────────────────────── 안전 모드: 지시서 준비와 관찰 ─────────────────────────
 
 /// OpenCode 에이전트 정의 (.opencode/agents/ilson-*.md).
-fn opencode_agent_file(id: &str, team: &[String], lead: bool, model: &str, allow_run: bool) -> String {
-    let e = roster::find(id).unwrap_or(Value::Null);
-    let is_dev = roster::DEV_TEAM.contains(&id);
+fn opencode_agent_file(ctx: &Ctx, id: &str, team: &[String], lead: bool, model: &str, allow_run: bool) -> String {
+    let e = ctx.employee_of(id);
+    let is_dev = roster::is_dev_id(id);
     let can_edit = is_dev && id != "minhyuk";
     let can_bash = can_edit && allow_run && id != "daeun";
     let can_web = !is_dev;
@@ -959,7 +1069,7 @@ fn opencode_agent_file(id: &str, team: &[String], lead: bool, model: &str, allow
         if can_bash { "allow" } else { "deny" },
         if can_web { "allow" } else { "deny" },
         if can_web { "allow" } else { "deny" },
-        persona(id)
+        ctx.persona_of(id)
     )
 }
 
@@ -981,7 +1091,7 @@ fn prepare_handoff(ctx: &Ctx, job: &AiJob) -> Result<()> {
     for id in &team {
         std::fs::write(
             agents_dir.join(format!("ilson-{id}.md")),
-            opencode_agent_file(id, &team, *id == job.actor, &model, allow_run),
+            opencode_agent_file(ctx, id, &team, *id == job.actor, &model, allow_run),
         )?;
     }
     let mut prompt = job.prompt.clone();
@@ -1062,7 +1172,7 @@ async fn watch_external(ctx: &Ctx, job: &AiJob) -> Result<(String, String)> {
                 if seen_status.get(id) != Some(&t) {
                     seen_status.insert(id.to_string(), t);
                     let line = std::fs::read_to_string(entry.path()).unwrap_or_default().lines().next().unwrap_or("").trim().chars().take(40).collect::<String>();
-                    ctx.report(id, &Activity { kind: "typing".into(), label: if line.is_empty() { "작업 중".into() } else { line }, notable: false });
+                    ctx.report(id, &Activity::new("typing", if line.is_empty() { "작업 중".to_string() } else { line }, false));
                 }
                 if newest.as_ref().is_none_or(|(nt, _)| t > *nt) {
                     newest = Some((t, id.to_string()));
@@ -1076,7 +1186,7 @@ async fn watch_external(ctx: &Ctx, job: &AiJob) -> Result<(String, String)> {
             if let Ok(files) = gitops::changed_files(&job.cwd) {
                 for f in files {
                     if seen_files.insert(f.clone()) {
-                        ctx.report(&active, &Activity { kind: "typing".into(), label: format!("고치는 중 · {}", f.rsplit('/').next().unwrap_or(&f)), notable: true });
+                        ctx.report(&active, &Activity::new("typing", format!("고치는 중 · {}", f.rsplit('/').next().unwrap_or(&f)), true));
                     }
                 }
             }
@@ -1357,7 +1467,7 @@ fn code_report(ctx: &Ctx) -> Value {
             continue;
         }
         let Some(text) = out["markdown"].as_str().filter(|t| !t.trim().is_empty()) else { continue };
-        let heading = if key == "build" { format!("개발 · {}", name_of(&ctx.employee_id)) } else { title.to_string() };
+        let heading = if key == "build" { format!("개발 · {}", ctx.name_of(&ctx.employee_id)) } else { title.to_string() };
         sections.push(heading.clone());
         // 각자 쓴 보고서의 제목 단계를 한 단계 내려 한 문서로 묶는다.
         let body: String = text.lines().map(|l| if l.starts_with('#') { format!("#{l}") } else { l.to_string() }).collect::<Vec<_>>().join("\n");
@@ -1488,7 +1598,17 @@ pub async fn execute(ctx: &Ctx, step_key: &str) -> Result<StepResult> {
         ("sua", "scan") => organize_scan(ctx),
         ("sua", "plan") => organize_plan(ctx),
         ("sua", "apply") => organize_apply(ctx),
-        (emp, key) if key != "deliver" && roster::DEV_TEAM.contains(&emp) => local_coding_step(ctx, key).await,
+        (emp, "prepare") if emp.starts_with("custom_office_") => {
+            let req = ctx.s("request");
+            if req.is_empty() {
+                bail!("요청할 업무 내용을 입력해 주세요.");
+            }
+            Ok(StepResult::new(
+                json!({ "request": req }),
+                format!("{} 전문 스킬을 적용해 작업을 준비합니다.", ctx.name_of(emp)),
+            ))
+        }
+        (emp, key) if key != "deliver" && roster::is_dev_id(emp) => local_coding_step(ctx, key).await,
         (_, "deliver") => deliver(ctx),
         (emp, key) => Err(anyhow!("알 수 없는 단계입니다: {emp}/{key}")),
     }
@@ -1599,7 +1719,7 @@ fn first_heading(md: &str) -> Option<String> {
 
 fn deliver(ctx: &Ctx) -> Result<StepResult> {
     let result = match ctx.employee_id.as_str() {
-        "taeo" | "yuna" | "geonwoo" | "sohee" | "daeun" => code_report(ctx),
+        emp if emp != "minhyuk" && roster::is_dev_id(emp) => code_report(ctx),
         "minhyuk" => {
             let review = ctx.out("review");
             let md = review["markdown"].as_str().unwrap_or("").to_string();
@@ -1625,7 +1745,12 @@ fn deliver(ctx: &Ctx) -> Result<StepResult> {
         }
         "sua" => organize_report(ctx),
         emp => {
-            let ai_key = match emp { "harin" | "jiho" => "write", "minjae" => "research", _ => "analyze" };
+            let ai_key = match emp {
+                "harin" | "jiho" => "write",
+                "minjae" => "research",
+                id if id.starts_with("custom_office_") => "write",
+                _ => "analyze",
+            };
             let ai = ctx.out(ai_key);
             let mut md = ai["markdown"].as_str().unwrap_or("").to_string();
             // 수집 자료 번호([1]..)는 그대로 두고, 웹 검색 출처를 뒤에 잇는다.
@@ -1646,6 +1771,9 @@ fn deliver(ctx: &Ctx) -> Result<StepResult> {
                 "seojin" => meta.insert(0, json!({ "label": "조사 주제", "value": ctx.s("topic") })),
                 "minjae" => meta.insert(0, json!({ "label": "찾는 고객", "value": ctx.s("target") })),
                 "jiho" => meta.insert(0, json!({ "label": "주제", "value": ctx.s("topic") })),
+                id if id.starts_with("custom_office_") => {
+                    meta.insert(0, json!({ "label": "담당 전문가", "value": ctx.name_of(id) }));
+                }
                 _ => {}
             }
             if !sources.is_empty() {
